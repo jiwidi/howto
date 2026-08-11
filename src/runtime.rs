@@ -24,7 +24,7 @@ const SERVER_IDLE_SECONDS: &str = "900";
 const SERVER_STATE_SCHEMA: u32 = 1;
 // Bump whenever fixed launch flags or the managed-server environment policy changes.
 const SERVER_RUNTIME_POLICY_SCHEMA: u32 = 1;
-const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const LOG_TAIL_READ_BYTES: u64 = 64 * 1_024;
 const LOG_TAIL_DISPLAY_BYTES: usize = 8 * 1_024;
 
