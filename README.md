@@ -275,7 +275,7 @@ least one route must return a successful status; this checks a supported
 diagnostic route, not chat-completion compatibility.
 
 In local mode, `doctor` also runs the resolved `llama-server --version` with a
-three-second deadline. Local readiness means the model is present, this runtime
+ten-second deadline. Local readiness means the model is present, this runtime
 probe succeeds, and an optional deep model check did not fail; a harmless query
 is still the end-to-end inference test.
 

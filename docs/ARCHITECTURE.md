@@ -180,7 +180,7 @@ exceed 2 MiB.
 
 Local `doctor` requires the resolved executable to be named `llama-server` and
 runs its `--version` mode in the same allowlisted environment with a
-three-second deadline. Local readiness means the model exists, that probe
+ten-second deadline. Local readiness means the model exists, that probe
 succeeds, and an optional deep digest check did not fail; it is not a full
 inference request.
 

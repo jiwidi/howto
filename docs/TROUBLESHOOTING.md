@@ -123,7 +123,7 @@ howto doctor
 Resolution order is `HOWTO_LLAMA_SERVER`, `llama_server_path`, `PATH`, then
 well-known Homebrew and system paths. The selected file must exist and be
 executable, and its resolved filename must be `llama-server`. `howto doctor` also
-runs `llama-server --version` with a three-second deadline; a failed probe keeps
+runs `llama-server --version` with a ten-second deadline; a failed probe keeps
 local readiness false. Run a harmless query to test model loading and inference.
 
 ## The local server does not start

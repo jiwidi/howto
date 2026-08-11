@@ -45,7 +45,7 @@ jobs:
       - name: Install completion validator
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes fish
+          sudo apt-get install --no-install-recommends --yes fish zsh
 
       - name: Validate workflows
         run: |
