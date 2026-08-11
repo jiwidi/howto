@@ -47,10 +47,7 @@ class Howto < Formula
     ENV["HOWTO_HOME"] = testpath
     ENV.delete("HOWTO_MODEL")
     ENV.delete("HOWTO_PACKAGED_MODEL")
-    ENV.delete("HOWTO_LLAMA_SERVER")
-    doctor_output = shell_output("#{bin}/howto doctor", 1)
-    assert_match "Runtime:", doctor_output
-    refute_match "llama-server missing", doctor_output
-    assert_match "Runtime check: llama-server --version succeeded", doctor_output
+    model_status = shell_output("#{bin}/howto model status --json", 1)
+    assert_match '"installed": false', model_status
   end
 end

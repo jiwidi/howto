@@ -8,6 +8,16 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-11
+
+### Fixed
+
+- Update Homebrew explicitly before release validation so hosted-runner code
+  cannot become incompatible with current bottle metadata.
+- Keep the Homebrew smoke test independent of `llama-server` cold-start
+  latency, while allowing the user-facing runtime diagnostic up to 30 seconds
+  on a cold machine.
+
 ## [0.1.0] - 2026-08-11
 
 ### Added
@@ -72,5 +82,6 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until
   reference implementation audit, security policy, privacy disclosure,
   architecture, and troubleshooting documentation.
 
-[Unreleased]: https://github.com/jiwidi/howto/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/jiwidi/howto/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/jiwidi/howto/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jiwidi/howto/releases/tag/v0.1.0
