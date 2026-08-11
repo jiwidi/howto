@@ -1,0 +1,374 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.86.0
+
+jobs:
+  verify:
+    name: Verify release tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Match tag to Cargo package version
+        id: version
+        shell: bash
+        run: |
+          release_version="${GITHUB_REF_NAME#v}"
+          manifest_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [[ "$GITHUB_REF_NAME" != "v$manifest_version" ]]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $manifest_version" >&2
+            exit 1
+          fi
+          if ! grep -Fq "## [$manifest_version] - " CHANGELOG.md; then
+            echo "CHANGELOG.md has no dated $manifest_version release section" >&2
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet refs/remotes/origin/main; then
+            echo "origin/main is unavailable in the release checkout" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "tagged commit $GITHUB_SHA is not contained in origin/main" >&2
+            exit 1
+          fi
+          if [[ ! "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "tag is not a supported semantic version: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          version_without_build="${release_version%%+*}"
+          if [[ "$version_without_build" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" \
+            --profile minimal \
+            --component clippy,rustfmt \
+            --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Run release checks
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked --all-targets --all-features
+          cargo fetch --locked
+          scripts/generate-third-party-licenses.py --check
+
+      - name: Audit locked Rust dependencies
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ github.token }}
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            target: aarch64-apple-darwin
+            platform: aarch64-apple-darwin
+          - runner: macos-26-intel
+            target: x86_64-apple-darwin
+            platform: x86_64-apple-darwin
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            platform: aarch64-unknown-linux-gnu
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            platform: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" \
+            --profile minimal \
+            --target "${{ matrix.target }}" \
+            --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Build
+        run: cargo build --locked --release --target "${{ matrix.target }}"
+
+      - name: Verify binary
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/howto"
+          "$binary" --version
+          "$binary" --help
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            codesign --verify --strict --verbose=2 "$binary"
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          archive="howto-${version}-${{ matrix.platform }}"
+          staging="$RUNNER_TEMP/$archive"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/howto" "$staging/howto"
+          cp \
+            LICENSE NOTICE README.md CHANGELOG.md CONTRIBUTING.md \
+            PRIVACY.md SECURITY.md THIRD_PARTY_LICENSES.txt \
+            "$staging/"
+          cp -R docs completions man "$staging/"
+          archive_mtime="$(git show -s --format=%ct "$GITHUB_SHA")"
+          scripts/create-release-archive.py \
+            "$staging" \
+            "$archive.tar.gz" \
+            --mtime "$archive_mtime"
+
+      - name: Upload packaged binary
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: howto-${{ matrix.platform }}
+          path: howto-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download packaged binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: howto-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create deterministic source archive and checksums
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          source_archive="howto-${version}-source.tar.gz"
+          git archive \
+            --format=tar \
+            --prefix="howto-${version}/" \
+            "$GITHUB_REF_NAME" | gzip -n > "dist/$source_archive"
+
+          platforms=(
+            aarch64-apple-darwin
+            x86_64-apple-darwin
+            aarch64-unknown-linux-gnu
+            x86_64-unknown-linux-gnu
+          )
+          archives=()
+          for platform in "${platforms[@]}"; do
+            archive="howto-${version}-${platform}.tar.gz"
+            root="howto-${version}-${platform}"
+            test -f "dist/$archive"
+            for required in \
+              howto LICENSE NOTICE README.md CHANGELOG.md CONTRIBUTING.md \
+              PRIVACY.md SECURITY.md THIRD_PARTY_LICENSES.txt \
+              docs/ATTRIBUTION.md docs/TROUBLESHOOTING.md \
+              completions/howto.bash completions/howto.fish \
+              completions/_howto man/howto.1; do
+              tar -tzf "dist/$archive" "$root/$required" >/dev/null
+            done
+            archives+=("$archive")
+          done
+
+          for required in \
+            Cargo.toml Cargo.lock LICENSE NOTICE README.md \
+            THIRD_PARTY_LICENSES.txt docs/ATTRIBUTION.md; do
+            tar -tzf "dist/$source_archive" "howto-${version}/$required" >/dev/null
+          done
+
+          cd dist
+          sha256sum --binary "${archives[@]}" "$source_archive" > SHA256SUMS
+
+      - name: Attest release artifacts
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if release_json="$(gh release view "$GITHUB_REF_NAME" --json isDraft 2>/dev/null)"; then
+            is_draft="$(jq -r .isDraft <<<"$release_json")"
+          else
+            release_flags=()
+            version_without_build="${version%%+*}"
+            if [[ "$version_without_build" == *-* ]]; then
+              release_flags+=(--prerelease)
+            fi
+            gh release create "$GITHUB_REF_NAME" \
+              --draft \
+              --verify-tag \
+              --title "HowTo ${version}" \
+              "${release_flags[@]}" \
+              --generate-notes
+            is_draft=true
+          fi
+
+          verification_dir="$RUNNER_TEMP/existing-release-assets"
+          mkdir -p "$verification_dir"
+          for artifact in dist/*; do
+            name="${artifact##*/}"
+            if gh release download "$GITHUB_REF_NAME" \
+              --pattern "$name" \
+              --dir "$verification_dir" >/dev/null 2>&1; then
+              if ! cmp --silent "$artifact" "$verification_dir/$name"; then
+                echo "published release asset differs and will not be replaced: $name" >&2
+                exit 1
+              fi
+            elif [[ "$is_draft" == true ]]; then
+              gh release upload "$GITHUB_REF_NAME" "$artifact"
+            else
+              echo "published release is missing immutable asset: $name" >&2
+              exit 1
+            fi
+          done
+
+          if [[ "$is_draft" == true ]]; then
+            gh release edit "$GITHUB_REF_NAME" --draft=false
+          fi
+
+  validate-homebrew:
+    name: Validate stable Homebrew install (${{ matrix.runner }})
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - macos-26
+          - ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
+    permissions:
+      contents: read
+      attestations: read
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.ref_name }}
+          persist-credentials: false
+
+      - name: Download and verify source archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          asset="howto-${version}-source.tar.gz"
+          gh release download "$GITHUB_REF_NAME" \
+            --pattern "$asset" \
+            --pattern SHA256SUMS \
+            --dir "$RUNNER_TEMP"
+          expected="$(awk -v asset="$asset" '$2 == "*" asset { print $1 }' "$RUNNER_TEMP/SHA256SUMS")"
+          actual="$(shasum -a 256 "$RUNNER_TEMP/$asset" | awk '{ print $1 }')"
+          if [[ ! "$expected" =~ ^[0-9a-f]{64}$ || "$actual" != "$expected" ]]; then
+            echo "source archive checksum verification failed" >&2
+            exit 1
+          fi
+          gh attestation verify "$RUNNER_TEMP/$asset" --repo "$GITHUB_REPOSITORY"
+          scripts/render-homebrew-formula.sh \
+            "$version" \
+            "$actual" \
+            "$RUNNER_TEMP/howto.rb"
+
+      - name: Audit, install, and test stable formula
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          fi
+          tap="jiwidi/howto-validation"
+          brew tap-new --no-git "$tap"
+          tap_root="$(brew --repository "$tap")"
+          cp "$RUNNER_TEMP/howto.rb" "$tap_root/Formula/howto.rb"
+          formula="$tap/howto"
+          ruby -c "$tap_root/Formula/howto.rb"
+          brew style "$tap_root/Formula/howto.rb"
+          brew audit --strict --formula "$formula"
+          brew install --formula "$formula"
+          brew test "$formula"
+
+  rollback-failed-release:
+    name: Return a failed release to draft
+    needs:
+      - publish
+      - validate-homebrew
+    if: ${{ always() && needs.publish.result == 'success' && needs.validate-homebrew.result != 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Remove the failed release from public view
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft
+
+  # Set the PUBLISH_HOMEBREW repository variable to "true" and configure the
+  # least-privilege HOMEBREW_TAP_TOKEN secret to enable automatic tap PRs.
+  publish-homebrew:
+    name: Propose Homebrew tap update
+    needs:
+      - verify
+      - validate-homebrew
+    # Keep the tap's stable formula on stable releases. Prerelease artifacts
+    # still pass the install audit above, but are installed directly by tag.
+    if: ${{ vars.PUBLISH_HOMEBREW == 'true' && needs.verify.outputs.prerelease == 'false' }}
+    permissions:
+      contents: read
+      attestations: read
+    uses: ./.github/workflows/publish-homebrew.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets:
+      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

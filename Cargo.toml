@@ -1,0 +1,46 @@
+[package]
+name = "howto"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+description = "Turn plain English into a shell command, locally"
+license = "Apache-2.0"
+repository = "https://github.com/jiwidi/howto"
+homepage = "https://github.com/jiwidi/howto"
+readme = "README.md"
+keywords = ["cli", "shell", "llm", "llama", "natural-language"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "howto"
+path = "src/main.rs"
+
+[dependencies]
+dirs = "6.0"
+fs2 = "0.4"
+hex = "0.4"
+libc = "0.2"
+nix = { version = "0.30", features = ["process", "signal", "user"] }
+rand = "0.9"
+regex = "1.11"
+reqwest = { version = "0.13.4", default-features = false, features = ["blocking", "json", "rustls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+thiserror = "2.0"
+tree-sitter = "0.25"
+tree-sitter-bash = "0.25.1"
+
+[dev-dependencies]
+tempfile = "3.20"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+strip = "symbols"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"

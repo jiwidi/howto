@@ -1,0 +1,158 @@
+.TH HOWTO 1 "August 11, 2026" "HowTo" "User Commands"
+.SH NAME
+howto \- turn plain English into a shell command locally
+.SH SYNOPSIS
+.B howto
+.RI [ options ] " request ..."
+.br
+.B howto
+.RI command
+.SH DESCRIPTION
+.B HowTo
+runs a local GGUF model through llama.cpp and prints one shell command suited to
+the current platform. It targets macOS with zsh and BSD tools first, and
+GNU/Linux with bash. Requests do not leave the machine when using the default
+provider.
+.PP
+The words help and version select management commands when alone. Doctor
+selects management parsing when alone or followed by an option. Model, server,
+and config do so when alone or followed by a documented action or option. Once
+selected, all remaining management arguments are validated strictly.
+Use
+.B --
+to force query parsing for natural language with a management-shaped prefix.
+.PP
+Generated commands are not executed unless
+.B --execute
+is supplied and an interactive confirmation succeeds. Commands classified as
+DANGER or UNKNOWN are never executed. The checker is a denylist and syntax
+analyzer, not a sandbox; always review generated commands.
+.SH OPTIONS
+.TP
+.BR -x ", " -e ", " --execute
+Execute the selected command after confirmation. Incompatible with
+.B --json
+and
+.BR --quiet .
+.TP
+.BR -c ", " --copy
+Copy the selected command to the clipboard.
+.TP
+.BR -q ", " --quiet
+Print only a command with no known risk. CAUTION, DANGER, and UNKNOWN output is
+refused in this mode. Incompatible with
+.BR --json ,
+.BR --execute ,
+and a count greater than one.
+.TP
+.BR -n ", " --count " " N
+Generate up to N alternatives, from 1 through 8.
+.TP
+.B --json
+Emit structured JSON.
+.TP
+.B --timing
+Print generation timing to standard error.
+.TP
+.BR -h ", " --help
+Show help and exit.
+.TP
+.BR -V ", " --version
+Show the HowTo version and exit.
+.SH COMMANDS
+.TP
+.B doctor [--json] [--deep]
+Inspect configuration, model, llama-server, and resident-server status. For a
+configured provider, try GET /health and then GET /v1/models, using the
+configured bearer token when present; this does not test chat completion. In
+local mode, require a successful, three-second llama-server --version probe.
+.TP
+.B model [status] [--json] [--deep]
+Inspect the installed model and optionally verify a managed or packaged copy
+of the default model against its pinned SHA-256 digest. Custom models have no
+built-in expected digest.
+.TP
+.B model install [-y|--yes]
+Download, resume, verify, and atomically install the pinned local model.
+.TP
+.B server [status] [--json]
+Show resident llama-server status.
+.TP
+.B server stop [--json]
+Stop only the llama-server process recorded and validated as HowTo's.
+.TP
+.B config [list [--json]|path|get KEY|set KEY VALUE|unset KEY]
+Inspect or update HowTo's JSON configuration.
+.TP
+.B help
+Show help and exit.
+.TP
+.B version
+Show the HowTo version and exit.
+.SH CONFIGURATION
+Configuration uses schema 1 and rejects schema 0, future schemas, and unknown
+keys. Stored model, llama-server, and shell paths must be absolute. The
+generation limit must be smaller than the configured context size. HTTP(S)
+provider URLs may include a base path but cannot include credentials, a query,
+or a fragment; Unix-socket provider paths must be absolute.
+.SH ENVIRONMENT
+.TP
+.B HOWTO_HOME
+Override all HowTo data directories with one absolute path. Relative paths
+are rejected. Intended for tests and portable setups.
+.TP
+.B HOWTO_MODEL
+Use a specific GGUF model file.
+.TP
+.B HOWTO_PACKAGED_MODEL
+Add a package-provided default-model candidate.
+.TP
+.B HOWTO_LLAMA_SERVER
+Use a specific llama-server executable.
+.TP
+.B HOWTO_API_KEY
+Bearer token for a configured external provider. It is removed from the
+environment of a generated command approved for execution.
+.TP
+.BR XDG_CONFIG_HOME ", " XDG_DATA_HOME ", " XDG_CACHE_HOME ", " XDG_STATE_HOME
+Linux directory overrides. A value must be absolute when set.
+.TP
+.B XDG_RUNTIME_DIR
+Runtime-state parent on macOS or Linux. A value must be absolute when set.
+.TP
+.B TMPDIR
+System temporary-directory override used when XDG_RUNTIME_DIR is absent. A
+value used for runtime state must be absolute.
+.SH FILES
+.TP
+.I ~/Library/Application Support/HowTo
+macOS configuration and models.
+.TP
+.I ~/.config/howto and ~/.local/share/howto
+Linux configuration and models.
+.SH EXAMPLES
+.nf
+howto "free port 8080"
+howto find files larger than 1GB
+howto -x show my current IP address
+howto doctor --deep
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+indicates success.
+.TP
+.B 1
+indicates an operational failure or an unsuccessful diagnostic/status check.
+.TP
+.B 2
+indicates invalid command-line usage.
+.TP
+.B 3
+indicates a configuration, dependency, or model error.
+.TP
+.B 4
+indicates a server, network, or model-response error.
+.SH SEE ALSO
+.BR zsh (1),
+.BR bash (1)

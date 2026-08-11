@@ -1,0 +1,41 @@
+HowTo
+Copyright 2026 HowTo contributors
+
+Licensed under the Apache License, Version 2.0. You may obtain a copy of
+the License at https://www.apache.org/licenses/LICENSE-2.0.
+
+Portions of this product are based on or adapted from whatisit,
+Copyright 2026 Mukesh Poudel, licensed under the Apache License, Version 2.0.
+HowTo is an independent project and its adaptations have been modified from
+the upstream work.
+
+The default nl2sh-1.5b-Q4_K_M model weights were created by Mukesh Poudel as
+a LoRA fine-tune of Qwen2.5-Coder-1.5B-Instruct. Qwen is Copyright 2024
+Alibaba Cloud and is used under the Apache License, Version 2.0. The fine-tuned
+weights are distributed by their author under the Apache License, Version 2.0.
+
+The upstream model author reports the following measured shares of the
+125,770-row training pool:
+
+  32.8%  Fig autocomplete specifications   MIT
+  23.1%  tldr-pages page content           CC-BY-4.0
+  18.0%  NL2SH-ALFA training split         MIT
+  11.8%  cli-commands-explained            CC0-1.0    (declared, unverified)
+   7.3%  command-generation                Apache-2.0 (declared, unverified)
+   7.1%  git-instruction                   MIT        (declared, unverified)
+
+The author further reports that 5.67% is verbatim NL2Bash data included through
+the NL2SH-ALFA split; the relevant data/bash corpus is licensed under MIT.
+
+Attribution required by CC-BY-4.0: the model training pool includes content
+from the tldr-pages team and contributors
+(https://github.com/tldr-pages/tldr), licensed under Creative Commons
+Attribution 4.0 International
+(https://creativecommons.org/licenses/by/4.0/). The upstream model training
+process transformed that content into instruction pairs and model weights.
+HowTo uses or redistributes the resulting model weights without modifying
+the weights. No endorsement by tldr-pages or its contributors is implied.
+
+HowTo uses llama.cpp as its local inference runtime. llama.cpp is licensed
+under the MIT License, Copyright 2023-2026 The ggml authors. Any distribution
+that bundles llama.cpp must include its copyright and MIT permission notice.

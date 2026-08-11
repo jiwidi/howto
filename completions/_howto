@@ -1,0 +1,99 @@
+#compdef howto
+
+_howto() {
+  local -a commands model_commands server_commands config_commands
+  commands=(
+    'doctor:check the model and runtime'
+    'model:install or inspect the model'
+    'server:inspect or stop the local server'
+    'config:read or change configuration'
+    'help:show help'
+    'version:show version'
+  )
+  model_commands=(
+    'status:inspect the local model'
+    'install:download and verify the local model'
+  )
+  server_commands=(
+    'status:inspect the resident model server'
+    'stop:stop the resident model server'
+  )
+  config_commands=(
+    'list:list configuration'
+    'path:print the configuration path'
+    'get:print one setting'
+    'set:change one setting'
+    'unset:restore one setting to its default'
+  )
+
+  if (( CURRENT > 2 )); then
+    case $words[2] in
+      doctor)
+        _values 'option' '--json[emit JSON]' '--deep[verify the model digest]'
+        return
+        ;;
+      model)
+        if (( CURRENT == 3 )); then
+          _values 'model command or option' \
+            'status[inspect the local model]' \
+            'install[download and verify the local model]' \
+            '--json[emit JSON]' \
+            '--deep[verify the model digest]' \
+            '--help[show help]'
+        elif [[ $words[3] == status ]]; then
+          _values 'option' '--json[emit JSON]' '--deep[verify the model digest]'
+        elif [[ $words[3] == install ]]; then
+          _values 'option' '-y[install without prompting]' '--yes[install without prompting]'
+        fi
+        return
+        ;;
+      server)
+        if (( CURRENT == 3 )); then
+          _values 'server command or option' \
+            'status[inspect the resident model server]' \
+            'stop[stop the resident model server]' \
+            '--json[emit JSON]' \
+            '--help[show help]'
+        else
+          _values 'option' '--json[emit JSON]'
+        fi
+        return
+        ;;
+      config)
+        if (( CURRENT == 3 )); then
+          _values 'configuration command or option' \
+            'list[list configuration]' \
+            'path[print the configuration path]' \
+            'get[print one setting]' \
+            'set[change one setting]' \
+            'unset[restore one setting to its default]' \
+            '--json[emit JSON]' \
+            '--help[show help]'
+        elif [[ $words[3] == list ]]; then
+          _values 'option' '--json[emit JSON]'
+        fi
+        return
+        ;;
+    esac
+  fi
+
+  _arguments -C \
+    '(-h --help)'{-h,--help}'[show help]' \
+    '(-V --version)'{-V,--version}'[show version]' \
+    '(-x -e --execute)'{-x,-e,--execute}'[execute after confirmation]' \
+    '(-c --copy)'{-c,--copy}'[copy generated command]' \
+    '(-q --quiet)'{-q,--quiet}'[print only a no-known-risk command]' \
+    '(-n --count)'{-n,--count}'[generate alternatives]:count (1-8):' \
+    '--json[emit JSON]' \
+    '--timing[show generation timing]' \
+    '1:command or request:->command' \
+    '*:request words:'
+
+  case $state in
+    command)
+      _describe 'command' commands
+      ;;
+  esac
+}
+
+_howto "$@"

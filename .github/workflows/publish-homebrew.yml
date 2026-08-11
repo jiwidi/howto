@@ -1,0 +1,156 @@
+name: Publish Homebrew formula
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Existing GitHub release tag to publish
+        required: true
+        type: string
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        description: Fine-grained token with contents and pull-request access to jiwidi/homebrew-tap
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing GitHub release tag to publish (for example v0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  attestations: read
+
+concurrency:
+  group: homebrew-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  tap-pr:
+    name: Open tap update pull request
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      TAP_REPOSITORY: jiwidi/homebrew-tap
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          persist-credentials: false
+
+      - name: Validate release input
+        shell: bash
+        run: |
+          manifest_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "invalid release tag: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          version_without_build="${RELEASE_TAG%%+*}"
+          if [[ "$version_without_build" == *-* ]]; then
+            echo "prerelease tags are not published to the stable Homebrew tap: $RELEASE_TAG" >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_TAG" != "v$manifest_version" ]]; then
+            echo "tag $RELEASE_TAG does not match Cargo.toml version $manifest_version" >&2
+            exit 1
+          fi
+
+      - name: Download and verify source release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#v}"
+          asset="howto-${version}-source.tar.gz"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$asset" \
+            --dir "$RUNNER_TEMP"
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern SHA256SUMS \
+            --dir "$RUNNER_TEMP"
+          expected="$(awk -v asset="$asset" '$2 == "*" asset { print $1 }' "$RUNNER_TEMP/SHA256SUMS")"
+          actual="$(shasum -a 256 "$RUNNER_TEMP/$asset" | awk '{ print $1 }')"
+          if [[ ! "$expected" =~ ^[0-9a-f]{64}$ || "$actual" != "$expected" ]]; then
+            echo "source archive checksum verification failed" >&2
+            exit 1
+          fi
+          gh attestation verify "$RUNNER_TEMP/$asset" --repo "$GITHUB_REPOSITORY"
+          printf '%s\n' "$actual" > "$RUNNER_TEMP/source.sha256"
+
+      - name: Prepare tap update
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#v}"
+          source_sha256="$(<"$RUNNER_TEMP/source.sha256")"
+          tap_path="$RUNNER_TEMP/homebrew-tap"
+          branch="automation/howto-${version}"
+
+          git clone "https://github.com/${TAP_REPOSITORY}.git" "$tap_path"
+          cd "$tap_path"
+          git fetch origin main
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+            git fetch origin "$branch"
+            git switch -C "$branch" "origin/$branch"
+          else
+            git switch -c "$branch"
+          fi
+
+          "$GITHUB_WORKSPACE/scripts/render-homebrew-formula.sh" \
+            "$version" \
+            "$source_sha256" \
+            "$tap_path/Formula/howto.rb"
+
+          ruby -c Formula/howto.rb
+          HOMEBREW_NO_AUTO_UPDATE=1 brew style Formula/howto.rb
+          git add Formula/howto.rb
+          git diff --cached --check
+
+          if ! git diff --cached --quiet; then
+            git config user.name "howto-release[bot]"
+            git config user.email "howto-release[bot]@users.noreply.github.com"
+            git commit -m "howto ${version}"
+          fi
+
+      - name: Push update and open pull request
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        shell: bash
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "HOMEBREW_TAP_TOKEN is not configured" >&2
+            exit 1
+          fi
+
+          version="${RELEASE_TAG#v}"
+          tap_path="$RUNNER_TEMP/homebrew-tap"
+          branch="automation/howto-${version}"
+          cd "$tap_path"
+
+          if git diff --quiet origin/main -- Formula/howto.rb; then
+            echo "tap formula is already current on main"
+            exit 0
+          fi
+
+          gh auth setup-git
+          git push --set-upstream origin "$branch"
+
+          open_pr="$(gh pr list \
+            --repo "$TAP_REPOSITORY" \
+            --head "$branch" \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')"
+          if [[ -z "$open_pr" ]]; then
+            gh pr create \
+              --repo "$TAP_REPOSITORY" \
+              --base main \
+              --head "$branch" \
+              --title "howto ${version}" \
+              --body "Update howto to ${version}. Generated from the immutable source archive attached to ${GITHUB_REPOSITORY}@${RELEASE_TAG}."
+          fi

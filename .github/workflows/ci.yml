@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.86.0
+
+jobs:
+  quality:
+    name: Format and lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" \
+            --profile minimal \
+            --component clippy,rustfmt \
+            --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Install completion validator
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes fish
+
+      - name: Validate workflows
+        run: |
+          GOBIN="$RUNNER_TEMP/bin" \
+            go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$RUNNER_TEMP/bin/actionlint" -no-color
+
+      - name: Validate packaging scripts
+        run: |
+          bash -n scripts/render-homebrew-formula.sh
+          shellcheck scripts/render-homebrew-formula.sh completions/howto.bash
+          zsh -n completions/_howto
+          fish --no-config --no-execute completions/howto.fish
+          fish --no-config -c \
+            'source completions/howto.fish; complete -C "howto model install "' \
+            | grep -Fxq -- --yes
+          ruby -c Formula/howto.rb
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" \
+            python3 -m py_compile \
+              scripts/create-release-archive.py \
+              scripts/generate-third-party-licenses.py
+          scripts/render-homebrew-formula.sh \
+            0.1.0 \
+            0000000000000000000000000000000000000000000000000000000000000000 \
+            "$RUNNER_TEMP/howto.rb"
+          ruby -c "$RUNNER_TEMP/howto.rb"
+          grep -Fq \
+            'url "https://github.com/jiwidi/howto/releases/download/v0.1.0/howto-0.1.0-source.tar.gz"' \
+            "$RUNNER_TEMP/howto.rb"
+
+          archive_fixture="$RUNNER_TEMP/howto-archive-fixture"
+          mkdir -p "$archive_fixture/docs"
+          printf '#!/bin/sh\nexit 0\n' > "$archive_fixture/howto"
+          printf 'notice\n' > "$archive_fixture/docs/NOTICE"
+          chmod 0755 "$archive_fixture/howto"
+          scripts/create-release-archive.py \
+            "$archive_fixture" "$RUNNER_TEMP/archive-a.tar.gz" --mtime 1
+          scripts/create-release-archive.py \
+            "$archive_fixture" "$RUNNER_TEMP/archive-b.tar.gz" --mtime 1
+          cmp "$RUNNER_TEMP/archive-a.tar.gz" "$RUNNER_TEMP/archive-b.tar.gz"
+          tar -tzf "$RUNNER_TEMP/archive-a.tar.gz" \
+            howto-archive-fixture/howto \
+            howto-archive-fixture/docs/NOTICE >/dev/null
+
+      - name: Verify third-party license bundle
+        run: |
+          cargo fetch --locked
+          scripts/generate-third-party-licenses.py --check
+
+  test:
+    name: Test (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26
+            target: aarch64-apple-darwin
+          - runner: macos-26-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" \
+            --profile minimal \
+            --target "${{ matrix.target }}" \
+            --no-self-update
+          rustup default "$RUST_TOOLCHAIN"
+
+      - name: Run tests
+        run: cargo test --locked --all-targets --all-features --target "${{ matrix.target }}"
+
+      - name: Build release binary
+        run: cargo build --locked --release --target "${{ matrix.target }}"
+
+      - name: Smoke-test CLI
+        run: |
+          binary="target/${{ matrix.target }}/release/howto"
+          "$binary" --version
+          "$binary" --help
