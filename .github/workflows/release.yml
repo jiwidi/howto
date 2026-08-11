@@ -330,6 +330,10 @@ jobs:
           if [[ "$RUNNER_OS" == Linux ]]; then
             eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
           fi
+          # Hosted runners can contain Homebrew code older than the current
+          # bottle metadata. Update once explicitly, then suppress redundant
+          # automatic updates for the remaining commands in this step.
+          brew update
           tap="jiwidi/howto-validation"
           brew tap-new --no-git "$tap"
           tap_root="$(brew --repository "$tap")"
