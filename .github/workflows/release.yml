@@ -132,6 +132,7 @@ jobs:
           "$binary" --version
           "$binary" --help
           if [[ "$RUNNER_OS" == macOS ]]; then
+            codesign --force --sign - "$binary"
             codesign --verify --strict --verbose=2 "$binary"
           fi
 

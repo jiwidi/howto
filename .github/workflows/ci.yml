@@ -132,7 +132,12 @@ jobs:
         run: cargo build --locked --release --target "${{ matrix.target }}"
 
       - name: Smoke-test CLI
+        shell: bash
         run: |
           binary="target/${{ matrix.target }}/release/howto"
           "$binary" --version
           "$binary" --help
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            codesign --force --sign - "$binary"
+            codesign --verify --strict --verbose=2 "$binary"
+          fi
