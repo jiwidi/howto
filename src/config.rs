@@ -19,6 +19,7 @@ pub struct Config {
     pub context_size: usize,
     pub max_tokens: usize,
     pub startup_timeout_seconds: u64,
+    pub show_tab_hint: bool,
     pub shell_path: PathBuf,
     pub model_id: String,
 }
@@ -36,6 +37,7 @@ impl Default for Config {
             context_size: 2_048,
             max_tokens: 96,
             startup_timeout_seconds: 90,
+            show_tab_hint: true,
             shell_path: PathBuf::from(if cfg!(target_os = "macos") {
                 "/bin/zsh"
             } else {
@@ -228,6 +230,14 @@ mod tests {
             load(&directory.path().join("missing.json")).unwrap(),
             Config::default()
         );
+    }
+
+    #[test]
+    fn existing_schema_one_config_defaults_new_preferences() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        std::fs::write(&path, br#"{"schema":1}"#).unwrap();
+        assert!(load(&path).unwrap().show_tab_hint);
     }
 
     #[test]

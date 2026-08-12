@@ -74,6 +74,13 @@ without downloading another model. A normal query made before setup offers to
 run it interactively; non-interactive queries fail with an instruction instead
 of consuming stdin or downloading data unexpectedly.
 
+The Tab hook is optional. Automatic setup finishes without it when the selected
+shell is unsupported or symlink approval is declined or unavailable. If a
+startup path contains a safe symlink, interactive setup shows the path, resolved
+target, and exact managed block in a separate default-No approval prompt;
+`--yes` never bypasses that review. An explicit `--shell` request remains
+strict and fails outside an interactive terminal instead of following a link.
+
 The model is downloaded from Hugging Face; prompts are not sent there.
 
 ## Use
@@ -106,6 +113,17 @@ the empty-line completion API available in Bash 4.1 and newer; macOS's default
 zsh is fully supported, while the legacy system Bash 3.2 is left unchanged.
 HowTo never presses Enter—the inserted command remains untrusted text for you
 to inspect and edit.
+
+To hide only the post-query `Press Tab at an empty prompt...` reminder while
+keeping Tab insertion enabled, change the persisted setting:
+
+```sh
+howto config set show_tab_hint false
+```
+
+Set it back to `true`, or run `howto config unset show_tab_hint`, to show the
+reminder again. This setting does not disable the shell integration or prevent
+an eligible generated command from being offered at the next empty prompt.
 
 Run `howto` with no request for an interactive prompt, or pipe a UTF-8 request on
 stdin:
@@ -234,6 +252,7 @@ Inspect and change settings without editing JSON by hand:
 howto config list
 howto config get threads
 howto config set threads 4
+howto config set show_tab_hint false
 howto config unset threads
 howto config path
 ```
@@ -247,6 +266,7 @@ howto config path
 | `context_size` | `2048` | Model context size. Valid range: 256–131072. |
 | `max_tokens` | `96` | Maximum generated tokens. Valid range: 16–4096 and strictly smaller than `context_size`. |
 | `startup_timeout_seconds` | `90` | Managed-server startup deadline. Valid range: 1–600. |
+| `show_tab_hint` | `true` | Show the post-query reminder that Tab can insert the pending command. Setting this to `false` hides only the reminder; Tab insertion remains enabled. |
 | `shell_path` | `/bin/zsh` on macOS; `/bin/bash` on Linux | Absolute path to zsh, bash, sh, or dash, used only after approved execution. |
 | `model_id` | `howto` | Model name sent to the completion endpoint and local runtime alias. |
 

@@ -66,12 +66,16 @@ jobs:
           fish --no-config -c \
             'source completions/howto.fish; complete -C "howto model install "' \
             | grep -Fxq -- --yes
+          cargo build --locked --bin howto
           expect -f scripts/test-shell-integration.exp
+          expect -f scripts/test-setup-symlink.exp
+          python3 scripts/test-tab-hint.py
           ruby -c Formula/howto.rb
           PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" \
             python3 -m py_compile \
               scripts/create-release-archive.py \
-              scripts/generate-third-party-licenses.py
+              scripts/generate-third-party-licenses.py \
+              scripts/test-tab-hint.py
           scripts/render-homebrew-formula.sh \
             0.1.0 \
             0000000000000000000000000000000000000000000000000000000000000000 \
@@ -147,6 +151,9 @@ jobs:
             codesign --verify --strict --verbose=2 "$binary"
           fi
 
-      - name: Test macOS shell adapter
+      - name: Test macOS shell integration
         if: runner.os == 'macOS'
-        run: expect -f scripts/test-shell-integration.exp
+        run: |
+          expect -f scripts/test-shell-integration.exp
+          HOWTO_TEST_BINARY="target/${{ matrix.target }}/release/howto" \
+            expect -f scripts/test-setup-symlink.exp

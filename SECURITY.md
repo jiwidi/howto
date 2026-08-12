@@ -105,7 +105,11 @@ Setup installs a small, auditable adapter in HowTo's private data directory and
 adds a marked source block to the selected shell startup file(s). Bash uses
 `.bashrc` plus its active login file. HowTo refuses unsafe or malformed files,
 writes changes atomically, backs up each existing file, and records the exact
-managed paths for reliable cleanup. Disable it with `howto shell disable`.
+managed paths for reliable cleanup. A symlink in the startup path is followed
+only when its canonical target, path ownership, and permissions pass validation
+and the user separately approves the displayed path, target, and exact block in
+an interactive terminal; `--yes` does not grant that approval. Disable the hook
+with `howto shell disable`.
 
 ## Provider and transport security
 

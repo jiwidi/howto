@@ -94,8 +94,10 @@ integration access or when integration is disabled. In addition:
   stderr may retain requests, generated commands, and findings;
 - the shell adapter adds a marked source block to the selected startup file(s);
   Bash uses `.bashrc` plus its active login file. HowTo creates a backup before
-  changing each existing file, and Homebrew uninstall does not remove these
-  user-owned files or backups;
+  changing each existing file. A safe symlink in a startup path is followed
+  only after a separate interactive prompt displays its resolved target and the
+  exact block. Homebrew uninstall does not remove these user-owned files or
+  backups;
 - `--copy` places a generated command on the system clipboard, where other
   applications and clipboard-history tools may access it; clipboard helpers
   are launched without `HOWTO_API_KEY` and the same injection-sensitive

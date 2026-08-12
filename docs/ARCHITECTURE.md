@@ -103,6 +103,20 @@ managed artifact, and otherwise uses the resumable installer. A configured
 provider skips local runtime and model acquisition. Repeated setup repairs the
 same integration without adding duplicate startup blocks.
 
+An unsupported automatically selected shell, declined symlink approval, or an
+unattended run that cannot request that approval is non-fatal: setup records
+completion without a shell. Explicit `--shell` requests and repairs of an
+already recorded integration remain strict so automation and existing state do
+not silently diverge. Other startup-file validation or mutation failures remain
+fatal and transactional.
+
+A safe symlink in a startup path is resolved read-only before installation. The
+interactive application layer displays the path, canonical target, and exact
+managed block, then requires a separate default-No approval that `--yes` does
+not imply. The shell layer re-resolves the link immediately before writing and
+accepts only the exact approved target and block. A recorded canonical target
+does not prompt again on an idempotent repair.
+
 The zsh, Bash, and fish adapters are tracked source files embedded into the
 binary with `include_str!`. Setup writes the selected adapter to the stable
 user data directory and atomically adds a marked source block to the shell's
@@ -324,7 +338,9 @@ schemas, and unknown keys, fills other missing keys from current defaults,
 validates ranges, refuses a symlinked file, and replaces it atomically after
 syncing both file and parent directory.
 `max_tokens` must be strictly smaller than `context_size`. Stored model,
-runtime, and shell paths must be absolute.
+runtime, and shell paths must be absolute. The `show_tab_hint` boolean is a
+presentation preference: disabling it suppresses only the post-query reminder,
+not pending-command publication or Tab insertion.
 
 macOS follows native Application Support, Caches, and Logs locations. Linux
 follows XDG config, data, cache, state, and runtime locations. Without

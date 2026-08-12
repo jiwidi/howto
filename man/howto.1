@@ -31,6 +31,12 @@ without submitting it. Tab keeps its normal completion behavior otherwise.
 Pending commands become unavailable after ten minutes. Bash integration
 requires Bash 4.1 or newer; the default macOS zsh is supported.
 .PP
+The boolean
+.B show_tab_hint
+configuration setting defaults to true. Setting it to false suppresses only
+the post-query reminder to press Tab; it does not disable Tab insertion or
+prevent an eligible command from being offered at the next empty prompt.
+.PP
 The words help and version select management commands when alone. Doctor
 and setup select management parsing when alone or followed by an option. Model,
 server, and config also select it when alone, or when followed by a documented
@@ -119,7 +125,9 @@ current shell.
 Install or repair the embedded adapter and marked startup-file blocks. Each
 existing startup file is backed up before an atomic change. Bash manages both
 .I ~/.bashrc
-and its active login file. Requires completed setup.
+and its active login file. A safe symlink in a startup path requires a separate,
+default-No interactive approval showing its resolved target and exact managed
+block; unattended invocations do not follow it. Requires completed setup.
 .TP
 .B shell disable [--shell zsh|bash|fish]
 Remove the selected or receipt-tracked managed startup blocks, adapter, and
@@ -131,7 +139,9 @@ surface; normal users should use
 .BR "howto setup" .
 .TP
 .B config [list [--json]|path|get KEY|set KEY VALUE|unset KEY]
-Inspect or update HowTo's JSON configuration.
+Inspect or update HowTo's JSON configuration. For example,
+.B howto config set show_tab_hint false
+hides only the post-query Tab reminder while leaving Tab insertion enabled.
 .TP
 .B help
 Show help and exit.
@@ -144,6 +154,8 @@ keys. Stored model, llama-server, and shell paths must be absolute. The
 generation limit must be smaller than the configured context size. HTTP(S)
 provider URLs may include a base path but cannot include credentials, a query,
 or a fragment; Unix-socket provider paths must be absolute.
+.B show_tab_hint
+accepts true or false and defaults to true.
 .SH ENVIRONMENT
 .TP
 .B HOWTO_HOME

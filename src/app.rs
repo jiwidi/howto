@@ -128,7 +128,10 @@ fn run_query(options: QueryOptions) -> Result<i32> {
         && matches!(assessment.risk, Risk::NoKnownRisk | Risk::Caution)
     {
         match store_pending_for_configured_shell(&paths, command) {
-            Ok(true) => eprintln!("Press Tab at an empty prompt to edit this command."),
+            Ok(true) if config.show_tab_hint => {
+                eprintln!("Press Tab at an empty prompt to edit this command.");
+            }
+            Ok(true) => {}
             Ok(false) => {}
             Err(error) => eprintln!("Warning: could not prepare the Tab shortcut: {error}"),
         }
@@ -543,8 +546,9 @@ fn run_setup_workflow(
             } else {
                 &[]
             };
-            match shell::enable_recorded(paths, kind, recorded) {
-                Ok(result) => {
+            let retry_command = format!("howto setup --shell {kind}");
+            match enable_shell_with_consent(paths, kind, recorded, &retry_command) {
+                Ok(ShellEnableOutcome::Enabled(result)) => {
                     let changed = result.changed;
                     let startup_files = result.startup_files.clone();
                     let backup_files = result.backup_files.clone();
@@ -577,6 +581,32 @@ fn run_setup_workflow(
                         eprintln!("Tab integration is already configured for {kind}.");
                     }
                     Some(kind)
+                }
+                Ok(ShellEnableOutcome::Declined)
+                    if explicit_shell.is_none() && previous_shell.is_none() =>
+                {
+                    eprintln!("Tab integration was skipped at your request.");
+                    None
+                }
+                Ok(ShellEnableOutcome::Declined) if previous_shell.is_some() => {
+                    return Err(Error::Configuration(
+                        "the existing Tab integration was left unchanged because symlink approval was declined"
+                            .into(),
+                    ));
+                }
+                Ok(ShellEnableOutcome::Declined) => {
+                    return Err(Error::Configuration(format!(
+                        "Tab integration for {kind} was not enabled because symlink approval was declined; setup was not completed"
+                    )));
+                }
+                Ok(ShellEnableOutcome::ApprovalRequired(message))
+                    if explicit_shell.is_none() && previous_shell.is_none() =>
+                {
+                    eprintln!("Tab integration was skipped: {message}");
+                    None
+                }
+                Ok(ShellEnableOutcome::ApprovalRequired(message)) => {
+                    return Err(Error::Configuration(message));
                 }
                 Err(Error::Dependency(message))
                     if explicit_shell.is_none() && previous_shell.is_none() =>
@@ -649,6 +679,65 @@ fn detect_optional_shell() -> Result<Option<shell::Kind>> {
         }
         Err(error) => Err(error),
     }
+}
+
+enum ShellEnableOutcome {
+    Enabled(shell::EnableResult),
+    Declined,
+    ApprovalRequired(String),
+}
+
+fn enable_shell_with_consent(
+    paths: &Paths,
+    kind: shell::Kind,
+    recorded_startup_files: &[PathBuf],
+    retry_command: &str,
+) -> Result<ShellEnableOutcome> {
+    let approvals = shell::startup_symlink_requests(paths, kind, recorded_startup_files)?;
+    if approvals.is_empty() {
+        return shell::enable_recorded(paths, kind, recorded_startup_files)
+            .map(ShellEnableOutcome::Enabled);
+    }
+
+    if !interactive() {
+        let links = approvals
+            .iter()
+            .map(|approval| {
+                format!(
+                    "{} -> {}",
+                    approval.link_path().display(),
+                    approval.target_path().display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(ShellEnableOutcome::ApprovalRequired(format!(
+            "shell startup symlink approval requires an interactive terminal ({links}); rerun `{retry_command}` to review the exact managed block and approve it, or leave integration disabled"
+        )));
+    }
+
+    for approval in &approvals {
+        eprintln!("HowTo found a symbolic link in the shell startup path:");
+        eprintln!("  Startup path: {}", approval.link_path().display());
+        eprintln!("  Resolved target: {}", approval.target_path().display());
+        eprintln!("HowTo would write this exact block to the resolved target:");
+        eprintln!("----- BEGIN HOWTO MANAGED BLOCK -----");
+        eprint!("{}", approval.managed_block());
+        if !approval.managed_block().ends_with('\n') {
+            eprintln!();
+        }
+        eprintln!("----- END HOWTO MANAGED BLOCK -----");
+
+        if !prompt_yes_no(
+            "Allow HowTo to follow this symbolic link and update the resolved target? [y/N] ",
+            false,
+        )? {
+            return Ok(ShellEnableOutcome::Declined);
+        }
+    }
+
+    shell::enable_recorded_approved(paths, kind, recorded_startup_files, &approvals)
+        .map(ShellEnableOutcome::Enabled)
 }
 
 fn interactive() -> bool {
@@ -897,7 +986,17 @@ fn run_shell(command: ShellCommand) -> Result<i32> {
             } else {
                 &[]
             };
-            let result = shell::enable_recorded(&paths, kind, recorded)?;
+            let retry_command = format!("howto shell enable --shell {kind}");
+            let result = match enable_shell_with_consent(&paths, kind, recorded, &retry_command)? {
+                ShellEnableOutcome::Enabled(result) => result,
+                ShellEnableOutcome::Declined => {
+                    eprintln!("Tab integration was not enabled; shell files were left unchanged.");
+                    return Ok(1);
+                }
+                ShellEnableOutcome::ApprovalRequired(message) => {
+                    return Err(Error::Configuration(message));
+                }
+            };
             let changed = result.changed;
             let startup_files = result.startup_files.clone();
             let backup_files = result.backup_files.clone();
@@ -1202,6 +1301,7 @@ fn config_value(config: &Config, key: &str) -> Result<String> {
         "context_size" => Ok(config.context_size.to_string()),
         "max_tokens" => Ok(config.max_tokens.to_string()),
         "startup_timeout_seconds" => Ok(config.startup_timeout_seconds.to_string()),
+        "show_tab_hint" => Ok(config.show_tab_hint.to_string()),
         "shell_path" => Ok(config.shell_path.display().to_string()),
         "model_id" => Ok(config.model_id.clone()),
         _ => Err(Error::Usage(format!("unknown config key `{key}`"))),
@@ -1227,6 +1327,9 @@ fn set_config_value(config: &mut Config, key: &str, value: Option<&str>) -> Resu
         "startup_timeout_seconds" => {
             config.startup_timeout_seconds =
                 parse_or_default(value, defaults.startup_timeout_seconds, key)?;
+        }
+        "show_tab_hint" => {
+            config.show_tab_hint = parse_or_default(value, defaults.show_tab_hint, key)?;
         }
         "shell_path" => {
             config.shell_path = value.map_or(defaults.shell_path, PathBuf::from);
@@ -1257,6 +1360,7 @@ fn print_config(config: &Config) {
         "context_size",
         "max_tokens",
         "startup_timeout_seconds",
+        "show_tab_hint",
         "shell_path",
         "model_id",
     ] {
@@ -1278,16 +1382,25 @@ mod tests {
         assert_eq!(config.threads, 3);
         assert_eq!(config_value(&config, "threads").unwrap(), "3");
         assert!(set_config_value(&mut config, "threads", Some("0")).is_err());
+        config.threads = 3;
+
+        set_config_value(&mut config, "show_tab_hint", Some("false")).unwrap();
+        assert!(!config.show_tab_hint);
+        assert_eq!(config_value(&config, "show_tab_hint").unwrap(), "false");
+        assert!(set_config_value(&mut config, "show_tab_hint", Some("sometimes")).is_err());
     }
 
     #[test]
     fn unset_restores_default() {
         let mut config = Config {
             model_id: "custom".into(),
+            show_tab_hint: false,
             ..Config::default()
         };
         set_config_value(&mut config, "model_id", None).unwrap();
+        set_config_value(&mut config, "show_tab_hint", None).unwrap();
         assert_eq!(config.model_id, Config::default().model_id);
+        assert!(config.show_tab_hint);
     }
 
     #[test]
