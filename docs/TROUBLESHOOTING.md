@@ -156,8 +156,20 @@ howto shell enable --shell zsh   # or bash/fish
 
 Bash needs version 4.1 or newer for its empty-line completion API. The system
 Bash 3.2 shipped by macOS is intentionally left unchanged; use the default zsh
-or a newer Bash. If setup refused a symlinked or malformed startup file, resolve
-that configuration manually and rerun setup rather than replacing the file.
+or a newer Bash. For a safe symlink in a startup path, HowTo shows the path, resolved
+target, and exact managed block and asks separately before following it; the
+default answer is No, and `--yes` does not bypass this review. If setup refuses
+an unsafe symlink or malformed startup file, resolve that configuration
+manually rather than replacing the file, or complete onboarding explicitly with
+`howto setup --no-shell`. Retry integration afterward (substituting `bash` or
+`fish` as needed):
+
+```sh
+howto shell enable --shell zsh
+```
+
+An explicit `howto setup --shell ...` request remains strict and reports the
+error.
 `howto shell disable` removes the selected or receipt-tracked integration;
 `howto setup --no-shell` sweeps every HowTo-managed shell integration.
 

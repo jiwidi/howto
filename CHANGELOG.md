@@ -39,6 +39,15 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until
   runtime and packaged-model integrity are checked before setup is recorded.
 - Make `doctor` report setup completion and require it for overall readiness.
 
+### Fixed
+
+- Complete first-time setup without the optional Tab integration when automatic
+  shell selection is unsupported or symlink approval is declined or unavailable.
+  Explicit shell selection and existing-integration repairs remain strict.
+- Allow owner-safe symlinks in startup paths only after a separate, default-No
+  interactive review of the path, canonical target, and exact managed block;
+  `--yes` and non-interactive invocations never imply approval.
+
 ## [0.1.1] - 2026-08-11
 
 ### Fixed

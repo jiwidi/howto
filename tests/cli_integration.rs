@@ -365,6 +365,99 @@ fn automatic_setup_skips_an_unsupported_login_shell() {
     assert_eq!(setup::load(&paths).unwrap().unwrap().shell, None);
 }
 
+#[cfg(unix)]
+#[test]
+fn noninteractive_automatic_setup_skips_a_startup_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let state = directory.path().join("state");
+    std::fs::create_dir_all(&home).unwrap();
+    let zshrc_target = home.join("managed-zshrc");
+    std::fs::write(&zshrc_target, "user configuration\n").unwrap();
+    symlink(&zshrc_target, home.join(".zshrc")).unwrap();
+    let paths = Paths::under(state.clone());
+    paths.create().unwrap();
+    config::save(
+        &paths.config_file(),
+        &Config {
+            server_url: Some("https://provider.example".into()),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_howto"))
+        .args(["setup", "--yes"])
+        .env("HOWTO_HOME", &state)
+        .env("HOME", &home)
+        .env("ZDOTDIR", &home)
+        .env("SHELL", "/bin/zsh")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains(&home.join(".zshrc").display().to_string()));
+    assert!(stderr.contains(" -> "));
+    assert!(stderr.contains(&zshrc_target.canonicalize().unwrap().display().to_string()));
+    assert!(stderr.contains("requires an interactive terminal"));
+    assert!(!stderr.contains("BEGIN HOWTO MANAGED BLOCK"));
+    assert!(stderr.contains("howto setup --shell zsh"));
+    assert!(stderr.contains("HowTo setup is complete."));
+
+    let receipt = setup::load(&paths).unwrap().unwrap();
+    assert_eq!(receipt.shell, None);
+    assert!(receipt.shell_startup_files.is_empty());
+    assert_eq!(
+        std::fs::read_link(home.join(".zshrc")).unwrap(),
+        zshrc_target
+    );
+    assert_eq!(
+        std::fs::read_to_string(home.join("managed-zshrc")).unwrap(),
+        "user configuration\n"
+    );
+    assert!(!paths.shell_dir().join("howto.zsh").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn noninteractive_shell_enable_refuses_a_startup_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let state = directory.path().join("state");
+    std::fs::create_dir_all(&home).unwrap();
+    let zshrc_target = home.join("managed-zshrc");
+    std::fs::write(&zshrc_target, "user configuration\n").unwrap();
+    symlink(&zshrc_target, home.join(".zshrc")).unwrap();
+    let paths = Paths::under(state.clone());
+    paths.create().unwrap();
+    setup::save(&paths, &setup::Receipt::new(None)).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_howto"))
+        .args(["shell", "enable", "--shell", "zsh"])
+        .env("HOWTO_HOME", &state)
+        .env("HOME", &home)
+        .env("ZDOTDIR", &home)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(3), "{stderr}");
+    assert!(stderr.contains("requires an interactive terminal"));
+    assert!(stderr.contains(&home.join(".zshrc").display().to_string()));
+    assert!(stderr.contains(" -> "));
+    assert!(stderr.contains(&zshrc_target.canonicalize().unwrap().display().to_string()));
+    assert!(!stderr.contains("BEGIN HOWTO MANAGED BLOCK"));
+    assert_eq!(setup::load(&paths).unwrap().unwrap().shell, None);
+    assert_eq!(
+        std::fs::read_to_string(home.join("managed-zshrc")).unwrap(),
+        "user configuration\n"
+    );
+    assert!(!paths.shell_dir().join("howto.zsh").exists());
+}
+
 #[test]
 fn shell_take_is_one_shot() {
     let directory = tempfile::tempdir().unwrap();

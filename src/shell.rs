@@ -86,6 +86,35 @@ pub struct EnableResult {
     previous: ShellSnapshot,
 }
 
+/// A symbolic link in a startup path that must be approved before HowTo follows it.
+///
+/// Instances are produced by [`startup_symlink_requests`]. Keeping the fields
+/// private ensures callers cannot accidentally manufacture an approval without
+/// first resolving and validating the link through this module.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StartupSymlink {
+    link_path: PathBuf,
+    target_path: PathBuf,
+    managed_block: String,
+}
+
+impl StartupSymlink {
+    #[must_use]
+    pub fn link_path(&self) -> &Path {
+        &self.link_path
+    }
+
+    #[must_use]
+    pub fn target_path(&self) -> &Path {
+        &self.target_path
+    }
+
+    #[must_use]
+    pub fn managed_block(&self) -> &str {
+        &self.managed_block
+    }
+}
+
 impl EnableResult {
     pub fn rollback(&self) -> Result<()> {
         if let Err(error) = restore_snapshot(&self.previous) {
@@ -196,10 +225,26 @@ pub fn enable_recorded(
     kind: Kind,
     recorded_startup_files: &[PathBuf],
 ) -> Result<EnableResult> {
+    enable_recorded_approved(paths, kind, recorded_startup_files, &[])
+}
+
+/// Enables shell integration after the caller has explicitly approved every
+/// symlink returned by [`startup_symlink_requests`].
+///
+/// The links are resolved again and must still point at the exact approved
+/// targets. This prevents a stale prompt from authorizing a different file.
+pub fn enable_recorded_approved(
+    paths: &Paths,
+    kind: Kind,
+    recorded_startup_files: &[PathBuf],
+    approved_symlinks: &[StartupSymlink],
+) -> Result<EnableResult> {
     ensure_supported(kind)?;
     paths.create()?;
     let adapter_file = paths.shell_dir().join(kind.adapter_file_name());
-    let startup_files = startup_files(kind)?;
+    let block = managed_block(kind, &adapter_file);
+    let startup_files =
+        resolve_startup_files(kind, &block, recorded_startup_files, approved_symlinks)?;
     let mut stale_startup_files = recorded_startup_files.to_vec();
     extend_unique(&mut stale_startup_files, marker_startup_files(kind)?);
     stale_startup_files.retain(|path| !startup_files.contains(path));
@@ -211,7 +256,6 @@ pub fn enable_recorded(
         return Err(rollback_shell_update(error, &previous, &[]));
     }
 
-    let block = managed_block(kind, &adapter_file);
     let enabled = match update_startup_files(&startup_files, Some(&block)) {
         Ok(update) => update,
         Err(error) => {
@@ -237,6 +281,32 @@ pub fn enable_recorded(
         backup_files,
         previous,
     })
+}
+
+/// Returns validated symbolic-link startup paths that need separate user approval.
+/// Inspecting them is read-only; modification remains impossible unless these
+/// exact values are passed to [`enable_recorded_approved`].
+pub fn startup_symlink_requests(
+    paths: &Paths,
+    kind: Kind,
+    recorded_startup_files: &[PathBuf],
+) -> Result<Vec<StartupSymlink>> {
+    let adapter_file = paths.shell_dir().join(kind.adapter_file_name());
+    let block = managed_block(kind, &adapter_file);
+    let mut requests = Vec::new();
+    for link_path in startup_files(kind)? {
+        if let Some(target_path) = redirected_startup_target(&link_path)? {
+            if recorded_startup_files.contains(&target_path) {
+                continue;
+            }
+            requests.push(StartupSymlink {
+                link_path,
+                target_path,
+                managed_block: block.clone(),
+            });
+        }
+    }
+    Ok(requests)
 }
 
 pub fn disable_recorded(
@@ -313,13 +383,15 @@ pub fn is_enabled(paths: &Paths, kind: Kind) -> bool {
 pub fn is_enabled_at(paths: &Paths, kind: Kind, recorded_startup_files: &[PathBuf]) -> bool {
     let adapter_file = paths.shell_dir().join(kind.adapter_file_name());
     let block = managed_block(kind, &adapter_file);
+    let Ok(current_startup_files) = effective_startup_files(kind) else {
+        return false;
+    };
     let startup_files = if recorded_startup_files.is_empty() {
-        let Ok(files) = startup_files(kind) else {
-            return false;
-        };
-        files
-    } else {
+        current_startup_files
+    } else if same_paths(&current_startup_files, recorded_startup_files) {
         recorded_startup_files.to_vec()
+    } else {
+        return false;
     };
     if startup_files.is_empty() {
         return false;
@@ -557,6 +629,247 @@ fn startup_files(kind: Kind) -> Result<Vec<PathBuf>> {
     }
 }
 
+fn resolve_startup_files(
+    kind: Kind,
+    block: &str,
+    recorded_startup_files: &[PathBuf],
+    approved_symlinks: &[StartupSymlink],
+) -> Result<Vec<PathBuf>> {
+    let mut resolved = Vec::new();
+    for path in startup_files(kind)? {
+        let effective_path = if let Some(target) = redirected_startup_target(&path)? {
+            let approved = recorded_startup_files.contains(&target)
+                || approved_symlinks.iter().any(|approval| {
+                    approval.link_path == path
+                        && approval.target_path == target
+                        && approval.managed_block == block
+                });
+            if !approved {
+                return Err(Error::Configuration(format!(
+                    "shell startup path {} contains a symlink and resolves to {}; explicit approval is required before modifying the resolved target",
+                    path.display(),
+                    target.display()
+                )));
+            }
+            target
+        } else {
+            path
+        };
+        if !resolved.contains(&effective_path) {
+            resolved.push(effective_path);
+        }
+    }
+    Ok(resolved)
+}
+
+fn effective_startup_files(kind: Kind) -> Result<Vec<PathBuf>> {
+    let mut effective = Vec::new();
+    for path in startup_files(kind)? {
+        let path = redirected_startup_target(&path)?.unwrap_or(path);
+        if !effective.contains(&path) {
+            effective.push(path);
+        }
+    }
+    Ok(effective)
+}
+
+fn same_paths(first: &[PathBuf], second: &[PathBuf]) -> bool {
+    first.len() == second.len()
+        && first.iter().all(|path| second.contains(path))
+        && second.iter().all(|path| first.contains(path))
+}
+
+/// Resolves a startup path if its final component or any user-controlled
+/// ancestor is a symlink. The returned path is canonical even when the final
+/// startup file does not exist yet.
+fn redirected_startup_target(path: &Path) -> Result<Option<PathBuf>> {
+    let logical_home = dirs::home_dir().ok_or_else(|| {
+        Error::Configuration("could not determine the current user's home directory".into())
+    })?;
+    let mut found_symlink = false;
+    let mut leaf_is_symlink = false;
+
+    // Ignore shared system ancestors of HOME (for example /var -> /private/var
+    // on macOS), but inspect HOME itself, everything beneath it, and any
+    // divergent path selected through ZDOTDIR/XDG_CONFIG_HOME.
+    for candidate in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        if !candidate.starts_with(&logical_home) && logical_home.starts_with(candidate) {
+            continue;
+        }
+        match fs::symlink_metadata(candidate) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                #[cfg(unix)]
+                ensure_current_user_owns(candidate, &metadata, "shell startup symlink")?;
+                fs::canonicalize(candidate).map_err(|error| {
+                    Error::Configuration(format!(
+                        "could not resolve shell startup symlink {}: {error}",
+                        candidate.display()
+                    ))
+                })?;
+                found_symlink = true;
+                leaf_is_symlink = candidate == path;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if !found_symlink {
+        return Ok(None);
+    }
+
+    let target = match fs::canonicalize(path) {
+        Ok(target) => target,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !leaf_is_symlink => {
+            canonicalize_missing_path(path)?
+        }
+        Err(error) => {
+            return Err(Error::Configuration(format!(
+                "could not resolve shell startup symlink {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    validate_resolved_startup_target(path, &target)?;
+    Ok(Some(target))
+}
+
+fn canonicalize_missing_path(path: &Path) -> Result<PathBuf> {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        match fs::symlink_metadata(existing) {
+            Ok(_) => {
+                let mut resolved = fs::canonicalize(existing).map_err(|error| {
+                    Error::Configuration(format!(
+                        "could not resolve shell startup path {}: {error}",
+                        path.display()
+                    ))
+                })?;
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let name = existing.file_name().ok_or_else(|| {
+                    Error::Configuration(format!(
+                        "could not resolve shell startup path {}",
+                        path.display()
+                    ))
+                })?;
+                missing.push(name.to_os_string());
+                existing = existing.parent().ok_or_else(|| {
+                    Error::Configuration(format!(
+                        "could not resolve shell startup path {}",
+                        path.display()
+                    ))
+                })?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn validate_resolved_startup_target(startup_path: &Path, target: &Path) -> Result<()> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| {
+            Error::Configuration("could not determine the current user's home directory".into())
+        })?
+        .canonicalize()
+        .map_err(|error| {
+            Error::Configuration(format!(
+                "could not resolve the current user's home directory: {error}"
+            ))
+        })?;
+    if !target.starts_with(&home) {
+        return Err(Error::Configuration(format!(
+            "shell startup symlink {} resolves outside the current user's home directory: {}",
+            startup_path.display(),
+            target.display()
+        )));
+    }
+    match fs::symlink_metadata(target) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(Error::Configuration(format!(
+                    "shell startup symlink {} does not resolve to a regular file: {}",
+                    startup_path.display(),
+                    target.display()
+                )));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                ensure_current_user_owns(target, &metadata, "resolved shell startup file")?;
+                if metadata.permissions().mode() & 0o022 != 0 {
+                    return Err(Error::Configuration(format!(
+                        "resolved shell startup file is writable by another user: {}",
+                        target.display()
+                    )));
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    #[cfg(unix)]
+    validate_owned_home_path(&home, target)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_current_user_owns(path: &Path, metadata: &fs::Metadata, description: &str) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    if metadata.uid() != nix::unistd::Uid::current().as_raw() {
+        return Err(Error::Configuration(format!(
+            "{description} is owned by another user: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn validate_owned_home_path(home: &Path, target: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut path = target.parent();
+    while let Some(directory) = path {
+        if !directory.starts_with(home) {
+            break;
+        }
+        let metadata = match fs::symlink_metadata(directory) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                path = directory.parent();
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(Error::Configuration(format!(
+                "resolved shell startup path contains an unsafe directory: {}",
+                directory.display()
+            )));
+        }
+        ensure_current_user_owns(directory, &metadata, "shell startup directory")?;
+        if metadata.permissions().mode() & 0o022 != 0 {
+            return Err(Error::Configuration(format!(
+                "shell startup directory is writable by another user: {}",
+                directory.display()
+            )));
+        }
+        if directory == home {
+            break;
+        }
+        path = directory.parent();
+    }
+    Ok(())
+}
+
 fn known_startup_files(kind: Kind) -> Result<Vec<PathBuf>> {
     if kind != Kind::Bash {
         return startup_files(kind);
@@ -573,20 +886,27 @@ fn known_startup_files(kind: Kind) -> Result<Vec<PathBuf>> {
 fn marker_startup_files(kind: Kind) -> Result<Vec<PathBuf>> {
     let mut matches = Vec::new();
     for path in known_startup_files(kind)? {
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-                let contents = fs::read(&path).map_err(|error| {
-                    Error::Configuration(format!("could not read {}: {error}", path.display()))
-                })?;
-                if contains_bytes(&contents, BLOCK_START.as_bytes())
-                    || contains_bytes(&contents, BLOCK_END.as_bytes())
-                {
-                    matches.push(path);
-                }
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        let candidate = match redirected_startup_target(&path) {
+            Ok(Some(target)) => target,
+            Ok(None) => path,
+            // Discovery must not turn an unrelated unsafe link into a setup
+            // failure. It also must never follow such a link.
+            Err(_) => continue,
+        };
+        match fs::symlink_metadata(&candidate) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
+        };
+        let contents = fs::read(&candidate).map_err(|error| {
+            Error::Configuration(format!("could not read {}: {error}", candidate.display()))
+        })?;
+        if (contains_bytes(&contents, BLOCK_START.as_bytes())
+            || contains_bytes(&contents, BLOCK_END.as_bytes()))
+            && !matches.contains(&candidate)
+        {
+            matches.push(candidate);
         }
     }
     Ok(matches)
@@ -1034,9 +1354,9 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{
-        detect, disable_recorded, discard_pending, enable_recorded, is_enabled_at, quote,
-        replace_managed_block, startup_files, store_pending, take_pending, update_startup_files,
-        Kind, BLOCK_END, BLOCK_START,
+        detect, disable_recorded, discard_pending, enable_recorded, enable_recorded_approved,
+        is_enabled_at, quote, replace_managed_block, startup_files, startup_symlink_requests,
+        store_pending, take_pending, update_startup_files, Kind, BLOCK_END, BLOCK_START,
     };
     use crate::paths::Paths;
 
@@ -1099,6 +1419,285 @@ mod tests {
         let block = format!("{BLOCK_START}\ntest\n{BLOCK_END}\n");
         assert!(update_startup_files(&[first.clone(), second], Some(&block)).is_err());
         assert_eq!(fs::read_to_string(first).unwrap(), "first\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn approved_startup_symlink_updates_and_records_only_the_resolved_target() {
+        use std::os::unix::fs::symlink;
+
+        let _guard = ENVIRONMENT.lock().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_zdotdir = env::var_os("ZDOTDIR");
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let dotfiles = home.join("dotfiles");
+        let links = home.join("links");
+        fs::create_dir_all(&dotfiles).unwrap();
+        fs::create_dir_all(&links).unwrap();
+        let target = dotfiles.join("zshrc");
+        fs::write(&target, "export USER_SETTING=1\n").unwrap();
+        symlink("../dotfiles/zshrc", links.join("current")).unwrap();
+        symlink("links/current", home.join(".zshrc")).unwrap();
+        env::set_var("HOME", &home);
+        env::set_var("ZDOTDIR", &home);
+
+        let paths = Paths::under(directory.path().join("state"));
+        let approvals = startup_symlink_requests(&paths, Kind::Zsh, &[]).unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].link_path(), home.join(".zshrc"));
+        assert_eq!(approvals[0].target_path(), target.canonicalize().unwrap());
+        assert!(approvals[0].managed_block().contains(BLOCK_START));
+
+        // The ordinary API remains strict: discovering a link does not itself
+        // authorize following it or create the adapter.
+        assert!(enable_recorded(&paths, Kind::Zsh, &[]).is_err());
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "export USER_SETTING=1\n"
+        );
+        assert!(!paths.shell_dir().join("howto.zsh").exists());
+
+        let enabled = enable_recorded_approved(&paths, Kind::Zsh, &[], &approvals).unwrap();
+        assert_eq!(enabled.startup_files, vec![target.canonicalize().unwrap()]);
+        assert!(fs::symlink_metadata(home.join(".zshrc"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(fs::read_to_string(&target).unwrap().contains(BLOCK_START));
+        assert!(is_enabled_at(&paths, Kind::Zsh, &enabled.startup_files));
+
+        // The exact resolved target in the receipt represents prior consent,
+        // so idempotent setup does not prompt again.
+        assert!(
+            startup_symlink_requests(&paths, Kind::Zsh, &enabled.startup_files)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !enable_recorded(&paths, Kind::Zsh, &enabled.startup_files)
+                .unwrap()
+                .changed
+        );
+
+        // Even with a lost receipt, safe marker discovery follows the known
+        // startup link and removes the managed block from the target.
+        assert!(disable_recorded(&paths, Kind::Zsh, &[]).unwrap().changed);
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "export USER_SETTING=1\n"
+        );
+        assert!(fs::symlink_metadata(home.join(".zshrc"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        if let Some(previous_home) = previous_home {
+            env::set_var("HOME", previous_home);
+        } else {
+            env::remove_var("HOME");
+        }
+        if let Some(previous_zdotdir) = previous_zdotdir {
+            env::set_var("ZDOTDIR", previous_zdotdir);
+        } else {
+            env::remove_var("ZDOTDIR");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_startup_ancestor_requires_approval_and_records_canonical_target() {
+        use std::os::unix::fs::symlink;
+
+        let _guard = ENVIRONMENT.lock().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_zdotdir = env::var_os("ZDOTDIR");
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let real_config = home.join("real-config");
+        fs::create_dir_all(&real_config).unwrap();
+        let target = real_config.join(".zshrc");
+        fs::write(&target, "export USER_SETTING=1\n").unwrap();
+        let linked_config = home.join("linked-config");
+        symlink("real-config", &linked_config).unwrap();
+        env::set_var("HOME", &home);
+        env::set_var("ZDOTDIR", &linked_config);
+
+        let paths = Paths::under(directory.path().join("state"));
+        let approvals = startup_symlink_requests(&paths, Kind::Zsh, &[]).unwrap();
+        assert_eq!(approvals.len(), 1);
+        assert_eq!(approvals[0].link_path(), linked_config.join(".zshrc"));
+        assert_eq!(approvals[0].target_path(), target.canonicalize().unwrap());
+
+        let error = enable_recorded(&paths, Kind::Zsh, &[]).unwrap_err();
+        assert!(error.to_string().contains("explicit approval is required"));
+        assert_eq!(
+            fs::read_to_string(&target).unwrap(),
+            "export USER_SETTING=1\n"
+        );
+
+        let enabled = enable_recorded_approved(&paths, Kind::Zsh, &[], &approvals).unwrap();
+        assert_eq!(enabled.startup_files, vec![target.canonicalize().unwrap()]);
+        assert!(fs::read_to_string(&target).unwrap().contains(BLOCK_START));
+        assert!(is_enabled_at(&paths, Kind::Zsh, &enabled.startup_files));
+
+        if let Some(previous_home) = previous_home {
+            env::set_var("HOME", previous_home);
+        } else {
+            env::remove_var("HOME");
+        }
+        if let Some(previous_zdotdir) = previous_zdotdir {
+            env::set_var("ZDOTDIR", previous_zdotdir);
+        } else {
+            env::remove_var("ZDOTDIR");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enabled_status_rejects_retargeted_removed_and_drifted_startup_paths() {
+        use std::os::unix::fs::symlink;
+
+        let _guard = ENVIRONMENT.lock().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_zdotdir = env::var_os("ZDOTDIR");
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        let first = home.join("first");
+        let second = home.join("second");
+        let drifted = home.join("drifted");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        fs::create_dir_all(&drifted).unwrap();
+        fs::write(first.join(".zshrc"), "first\n").unwrap();
+        let selected = home.join("selected");
+        symlink("first", &selected).unwrap();
+        env::set_var("HOME", &home);
+        env::set_var("ZDOTDIR", &selected);
+
+        let paths = Paths::under(directory.path().join("state"));
+        let approvals = startup_symlink_requests(&paths, Kind::Zsh, &[]).unwrap();
+        let enabled = enable_recorded_approved(&paths, Kind::Zsh, &[], &approvals).unwrap();
+        let configured = fs::read_to_string(first.join(".zshrc")).unwrap();
+        fs::write(second.join(".zshrc"), &configured).unwrap();
+        fs::write(drifted.join(".zshrc"), &configured).unwrap();
+        assert!(is_enabled_at(&paths, Kind::Zsh, &enabled.startup_files));
+
+        fs::remove_file(&selected).unwrap();
+        symlink("second", &selected).unwrap();
+        assert!(!is_enabled_at(&paths, Kind::Zsh, &enabled.startup_files));
+
+        fs::remove_file(&selected).unwrap();
+        fs::create_dir(&selected).unwrap();
+        fs::write(selected.join(".zshrc"), &configured).unwrap();
+        assert!(!is_enabled_at(&paths, Kind::Zsh, &enabled.startup_files));
+
+        env::set_var("ZDOTDIR", &drifted);
+        assert!(!is_enabled_at(&paths, Kind::Zsh, &enabled.startup_files));
+
+        if let Some(previous_home) = previous_home {
+            env::set_var("HOME", previous_home);
+        } else {
+            env::remove_var("HOME");
+        }
+        if let Some(previous_zdotdir) = previous_zdotdir {
+            env::set_var("ZDOTDIR", previous_zdotdir);
+        } else {
+            env::remove_var("ZDOTDIR");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_symlink_approval_is_revalidated_before_writing() {
+        use std::os::unix::fs::symlink;
+
+        let _guard = ENVIRONMENT.lock().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_zdotdir = env::var_os("ZDOTDIR");
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let first = home.join("first.zsh");
+        let second = home.join("second.zsh");
+        fs::write(&first, "first\n").unwrap();
+        fs::write(&second, "second\n").unwrap();
+        let link = home.join(".zshrc");
+        symlink("first.zsh", &link).unwrap();
+        env::set_var("HOME", &home);
+        env::set_var("ZDOTDIR", &home);
+
+        let paths = Paths::under(directory.path().join("state"));
+        let approvals = startup_symlink_requests(&paths, Kind::Zsh, &[]).unwrap();
+        fs::remove_file(&link).unwrap();
+        symlink("second.zsh", &link).unwrap();
+        let error = enable_recorded_approved(&paths, Kind::Zsh, &[], &approvals).unwrap_err();
+        assert!(error.to_string().contains("explicit approval is required"));
+        assert_eq!(fs::read_to_string(first).unwrap(), "first\n");
+        assert_eq!(fs::read_to_string(second).unwrap(), "second\n");
+        assert!(!paths.shell_dir().join("howto.zsh").exists());
+
+        if let Some(previous_home) = previous_home {
+            env::set_var("HOME", previous_home);
+        } else {
+            env::remove_var("HOME");
+        }
+        if let Some(previous_zdotdir) = previous_zdotdir {
+            env::set_var("ZDOTDIR", previous_zdotdir);
+        } else {
+            env::remove_var("ZDOTDIR");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_symlink_target_must_be_safe_and_inside_home() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let _guard = ENVIRONMENT.lock().unwrap();
+        let previous_home = env::var_os("HOME");
+        let previous_zdotdir = env::var_os("ZDOTDIR");
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        let link = home.join(".zshrc");
+        let outside = directory.path().join("outside.zsh");
+        fs::write(&outside, "outside\n").unwrap();
+        symlink(&outside, &link).unwrap();
+        env::set_var("HOME", &home);
+        env::set_var("ZDOTDIR", &home);
+        let paths = Paths::under(directory.path().join("state"));
+
+        let error = startup_symlink_requests(&paths, Kind::Zsh, &[]).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("outside the current user's home"));
+
+        fs::remove_file(&link).unwrap();
+        let writable = home.join("writable.zsh");
+        fs::write(&writable, "writable\n").unwrap();
+        fs::set_permissions(&writable, fs::Permissions::from_mode(0o666)).unwrap();
+        symlink("writable.zsh", &link).unwrap();
+        let error = startup_symlink_requests(&paths, Kind::Zsh, &[]).unwrap_err();
+        assert!(error.to_string().contains("writable by another user"));
+
+        fs::remove_file(&link).unwrap();
+        symlink("missing.zsh", &link).unwrap();
+        let error = startup_symlink_requests(&paths, Kind::Zsh, &[]).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("could not resolve shell startup symlink"));
+
+        if let Some(previous_home) = previous_home {
+            env::set_var("HOME", previous_home);
+        } else {
+            env::remove_var("HOME");
+        }
+        if let Some(previous_zdotdir) = previous_zdotdir {
+            env::set_var("ZDOTDIR", previous_zdotdir);
+        } else {
+            env::remove_var("ZDOTDIR");
+        }
     }
 
     #[cfg(unix)]

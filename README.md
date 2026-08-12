@@ -74,6 +74,13 @@ without downloading another model. A normal query made before setup offers to
 run it interactively; non-interactive queries fail with an instruction instead
 of consuming stdin or downloading data unexpectedly.
 
+The Tab hook is optional. Automatic setup finishes without it when the selected
+shell is unsupported or symlink approval is declined or unavailable. If a
+startup path contains a safe symlink, interactive setup shows the path, resolved
+target, and exact managed block in a separate default-No approval prompt;
+`--yes` never bypasses that review. An explicit `--shell` request remains
+strict and fails outside an interactive terminal instead of following a link.
+
 The model is downloaded from Hugging Face; prompts are not sent there.
 
 ## Use

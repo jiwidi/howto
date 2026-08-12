@@ -543,8 +543,9 @@ fn run_setup_workflow(
             } else {
                 &[]
             };
-            match shell::enable_recorded(paths, kind, recorded) {
-                Ok(result) => {
+            let retry_command = format!("howto setup --shell {kind}");
+            match enable_shell_with_consent(paths, kind, recorded, &retry_command) {
+                Ok(ShellEnableOutcome::Enabled(result)) => {
                     let changed = result.changed;
                     let startup_files = result.startup_files.clone();
                     let backup_files = result.backup_files.clone();
@@ -577,6 +578,32 @@ fn run_setup_workflow(
                         eprintln!("Tab integration is already configured for {kind}.");
                     }
                     Some(kind)
+                }
+                Ok(ShellEnableOutcome::Declined)
+                    if explicit_shell.is_none() && previous_shell.is_none() =>
+                {
+                    eprintln!("Tab integration was skipped at your request.");
+                    None
+                }
+                Ok(ShellEnableOutcome::Declined) if previous_shell.is_some() => {
+                    return Err(Error::Configuration(
+                        "the existing Tab integration was left unchanged because symlink approval was declined"
+                            .into(),
+                    ));
+                }
+                Ok(ShellEnableOutcome::Declined) => {
+                    return Err(Error::Configuration(format!(
+                        "Tab integration for {kind} was not enabled because symlink approval was declined; setup was not completed"
+                    )));
+                }
+                Ok(ShellEnableOutcome::ApprovalRequired(message))
+                    if explicit_shell.is_none() && previous_shell.is_none() =>
+                {
+                    eprintln!("Tab integration was skipped: {message}");
+                    None
+                }
+                Ok(ShellEnableOutcome::ApprovalRequired(message)) => {
+                    return Err(Error::Configuration(message));
                 }
                 Err(Error::Dependency(message))
                     if explicit_shell.is_none() && previous_shell.is_none() =>
@@ -649,6 +676,65 @@ fn detect_optional_shell() -> Result<Option<shell::Kind>> {
         }
         Err(error) => Err(error),
     }
+}
+
+enum ShellEnableOutcome {
+    Enabled(shell::EnableResult),
+    Declined,
+    ApprovalRequired(String),
+}
+
+fn enable_shell_with_consent(
+    paths: &Paths,
+    kind: shell::Kind,
+    recorded_startup_files: &[PathBuf],
+    retry_command: &str,
+) -> Result<ShellEnableOutcome> {
+    let approvals = shell::startup_symlink_requests(paths, kind, recorded_startup_files)?;
+    if approvals.is_empty() {
+        return shell::enable_recorded(paths, kind, recorded_startup_files)
+            .map(ShellEnableOutcome::Enabled);
+    }
+
+    if !interactive() {
+        let links = approvals
+            .iter()
+            .map(|approval| {
+                format!(
+                    "{} -> {}",
+                    approval.link_path().display(),
+                    approval.target_path().display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Ok(ShellEnableOutcome::ApprovalRequired(format!(
+            "shell startup symlink approval requires an interactive terminal ({links}); rerun `{retry_command}` to review the exact managed block and approve it, or leave integration disabled"
+        )));
+    }
+
+    for approval in &approvals {
+        eprintln!("HowTo found a symbolic link in the shell startup path:");
+        eprintln!("  Startup path: {}", approval.link_path().display());
+        eprintln!("  Resolved target: {}", approval.target_path().display());
+        eprintln!("HowTo would write this exact block to the resolved target:");
+        eprintln!("----- BEGIN HOWTO MANAGED BLOCK -----");
+        eprint!("{}", approval.managed_block());
+        if !approval.managed_block().ends_with('\n') {
+            eprintln!();
+        }
+        eprintln!("----- END HOWTO MANAGED BLOCK -----");
+
+        if !prompt_yes_no(
+            "Allow HowTo to follow this symbolic link and update the resolved target? [y/N] ",
+            false,
+        )? {
+            return Ok(ShellEnableOutcome::Declined);
+        }
+    }
+
+    shell::enable_recorded_approved(paths, kind, recorded_startup_files, &approvals)
+        .map(ShellEnableOutcome::Enabled)
 }
 
 fn interactive() -> bool {
@@ -897,7 +983,17 @@ fn run_shell(command: ShellCommand) -> Result<i32> {
             } else {
                 &[]
             };
-            let result = shell::enable_recorded(&paths, kind, recorded)?;
+            let retry_command = format!("howto shell enable --shell {kind}");
+            let result = match enable_shell_with_consent(&paths, kind, recorded, &retry_command)? {
+                ShellEnableOutcome::Enabled(result) => result,
+                ShellEnableOutcome::Declined => {
+                    eprintln!("Tab integration was not enabled; shell files were left unchanged.");
+                    return Ok(1);
+                }
+                ShellEnableOutcome::ApprovalRequired(message) => {
+                    return Err(Error::Configuration(message));
+                }
+            };
             let changed = result.changed;
             let startup_files = result.startup_files.clone();
             let backup_files = result.backup_files.clone();

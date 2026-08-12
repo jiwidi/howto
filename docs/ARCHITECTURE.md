@@ -103,6 +103,20 @@ managed artifact, and otherwise uses the resumable installer. A configured
 provider skips local runtime and model acquisition. Repeated setup repairs the
 same integration without adding duplicate startup blocks.
 
+An unsupported automatically selected shell, declined symlink approval, or an
+unattended run that cannot request that approval is non-fatal: setup records
+completion without a shell. Explicit `--shell` requests and repairs of an
+already recorded integration remain strict so automation and existing state do
+not silently diverge. Other startup-file validation or mutation failures remain
+fatal and transactional.
+
+A safe symlink in a startup path is resolved read-only before installation. The
+interactive application layer displays the path, canonical target, and exact
+managed block, then requires a separate default-No approval that `--yes` does
+not imply. The shell layer re-resolves the link immediately before writing and
+accepts only the exact approved target and block. A recorded canonical target
+does not prompt again on an idempotent repair.
+
 The zsh, Bash, and fish adapters are tracked source files embedded into the
 binary with `include_str!`. Setup writes the selected adapter to the stable
 user data directory and atomically adds a marked source block to the shell's

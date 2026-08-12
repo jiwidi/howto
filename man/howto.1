@@ -119,7 +119,9 @@ current shell.
 Install or repair the embedded adapter and marked startup-file blocks. Each
 existing startup file is backed up before an atomic change. Bash manages both
 .I ~/.bashrc
-and its active login file. Requires completed setup.
+and its active login file. A safe symlink in a startup path requires a separate,
+default-No interactive approval showing its resolved target and exact managed
+block; unattended invocations do not follow it. Requires completed setup.
 .TP
 .B shell disable [--shell zsh|bash|fish]
 Remove the selected or receipt-tracked managed startup blocks, adapter, and
