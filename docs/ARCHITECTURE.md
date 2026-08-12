@@ -11,7 +11,7 @@ optional interactive execution gate.
 request
   │
   ▼
-CLI parser ──► platform prompt + config
+CLI parser ──► setup receipt gate ──► platform prompt + config
   │
   ├── local provider: model resolver ─► managed llama-server ─┐
   │                                                          │
@@ -44,6 +44,8 @@ passes the checker.
 | `src/cli.rs` | Dependency-free argument grammar, front-only query options, help, and subcommands. |
 | `src/app.rs` | Use-case orchestration, stdout/stderr shape, selection, risk display, model prompts, diagnostics, and config commands. |
 | `src/config.rs` | Versioned JSON schema, defaults, validation, atomic owner-only writes, and symlink refusal. |
+| `src/setup.rs` | Versioned setup receipt, setup serialization lock, atomic writes, and incomplete-state detection. |
+| `src/shell.rs` | zsh/Bash/fish adapter installation, startup-file management, and private session-scoped pending-command transfer. |
 | `src/paths.rs` | macOS-native, Linux XDG, runtime, and `HOWTO_HOME` paths with owner-only directories. |
 | `src/model.rs` | Model manifest, resolution precedence, resumable download, disk-space and range checks, locking, SHA-256 verification, and atomic install. |
 | `src/runtime.rs` | `llama-server` resolution, local process lifecycle, Unix-socket HTTP client, authentication, state identity, health, logs, and configured connections. |
@@ -65,12 +67,14 @@ list as options would corrupt requests such as `find files with -name`.
 `--` explicitly terminates option parsing.
 
 Management dispatch uses the leading argument only. `help` and `version`
-dispatch when alone; `doctor` dispatches when alone or followed by an option;
-and `model`, `server`, and `config` dispatch when alone or followed by one of
-their documented actions or an option. Once selected, the management parser
-validates all remaining arguments strictly. Ordinary followups such as
-`help me` remain query text. `--` forces query parsing when natural language
-begins with a management-shaped prefix.
+dispatch when alone; `setup` and `doctor` dispatch when alone or followed by an
+option; `model`, `server`, and `config` also dispatch when alone, or when
+followed by one of their documented actions or an option; and `shell` requires
+an action or option. Once selected, the management parser validates all
+remaining arguments strictly. Ordinary followups such as
+`help me`, `setup a venv`, and `shell into a container` remain query text. `--`
+forces query parsing when natural language begins with a management-shaped
+prefix.
 
 With no argument and a terminal, `app` asks for a request. With non-terminal
 stdin, it reads at most 8192 bytes of valid UTF-8. Requests passed as arguments
@@ -82,6 +86,43 @@ without hiding warnings. JSON is a query output format, not an execution
 protocol, so the parser rejects `--json` together with `--execute`. Quiet mode
 is also incompatible with JSON, execution, and a candidate count greater than
 one; it cannot conceal a selection or an undisplayed alternative.
+
+## Setup and shell integration
+
+Query generation requires a separate schema-versioned `setup.json` receipt.
+The presence of a model alone is not treated as consent or completed
+onboarding. An interactive query without the receipt offers to run the same
+setup workflow; JSON, quiet, piped, and other non-interactive requests fail
+before consuming request input. Help, version, setup, doctor, model, server,
+shell, and config operations remain available for repair.
+
+Setup is serialized with a private lock and writes the receipt only after the
+runtime/model phase and optional shell phase both finish. Local setup resolves
+`llama-server` before a potentially large download, verifies an existing
+managed artifact, and otherwise uses the resumable installer. A configured
+provider skips local runtime and model acquisition. Repeated setup repairs the
+same integration without adding duplicate startup blocks.
+
+The zsh, Bash, and fish adapters are tracked source files embedded into the
+binary with `include_str!`. Setup writes the selected adapter to the stable
+user data directory and atomically adds a marked source block to the shell's
+startup file or files, backing up each existing file first. Bash manages both
+`.bashrc` and its active login file. The setup receipt records the exact paths,
+so migration and disable remain reliable when `ZDOTDIR`, XDG configuration, or
+Bash login-file precedence later changes. No Homebrew Cellar path is persisted.
+The current parent shell cannot be changed by a child process, so activation
+starts in a new shell. `shell disable` removes the recorded blocks and adapter.
+
+Each loaded adapter exports a non-secret session identifier. After an
+interactive single-result query, `NO_KNOWN_RISK` and `CAUTION` commands can be
+written to an owner-only runtime file keyed by the SHA-256 of that identifier.
+Tab on an empty buffer atomically claims and deletes the file, validates the
+payload again, and places it in the shell line editor without submitting.
+Pending commands expire after ten minutes and do not cross shell sessions.
+Normal Tab completion is preserved on nonempty buffers and when no command is
+pending. Bash uses its empty-line completion API and therefore requires Bash
+4.1 or newer; legacy macOS Bash is left unchanged, while macOS's default zsh
+is supported.
 
 ## Model boundary
 
@@ -298,10 +339,11 @@ exact locations and retention.
 
 ## Packaging and release
 
-The repository formula is a HEAD bootstrap until the first stable tap release.
-It builds and installs the Rust binary from source, depends on Homebrew's
-`llama.cpp`, and installs the `howto` manual page and shell completions plus the
-project documentation, notices, and locked Rust dependency-license bundle.
+The repository formula is the source template for stable tap releases and
+optional HEAD builds. It builds and installs the Rust binary from source,
+depends on Homebrew's `llama.cpp`, and installs the `howto` manual page and
+shell completions plus the project documentation, notices, and locked Rust
+dependency-license bundle.
 Release automation renders a versioned formula with the immutable source-archive
 URL and SHA-256.
 
@@ -309,8 +351,9 @@ A version tag must exactly match `Cargo.toml`. CI builds and tests four native
 targets, and the tagged commit must be contained in `main`. The release
 workflow creates deterministic native archives named with their Rust target
 triples and containing the binaries, documentation, legal and dependency
-notices, manual page, and shell completions, plus a deterministic source archive, `SHA256SUMS`, and
-GitHub build-provenance attestations. It uploads through a draft release,
+notices, manual page, shell completions, and embedded-adapter source, plus a
+deterministic source archive, `SHA256SUMS`, and GitHub build-provenance
+attestations. It uploads through a draft release,
 refuses to replace a differing existing asset, and publishes only after the
 asset set is complete. It then verifies the source checksum and attestation and
 runs Homebrew's strict audit, install, and test on macOS and Linux; failure or

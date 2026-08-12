@@ -17,8 +17,14 @@ _howto() {
     _howto_complete_words "1 2 3 4 5 6 7 8" "$current"
   elif [[ $COMP_CWORD -eq 1 ]]; then
     _howto_complete_words \
-      "doctor model server config help version -h --help -V --version -x -e --execute -c --copy -q --quiet -n --count --json --timing --" \
+      "setup doctor model server shell config help version -h --help -V --version -x -e --execute -c --copy -q --quiet -n --count --json --timing --" \
       "$current"
+  elif [[ $first == setup && $COMP_CWORD -ge 2 ]]; then
+    if [[ $previous == --shell ]]; then
+      _howto_complete_words "zsh bash fish" "$current"
+    else
+      _howto_complete_words "-y --yes --no-shell --shell --help" "$current"
+    fi
   elif [[ $first == doctor && $COMP_CWORD -eq 2 ]]; then
     _howto_complete_words "--json --deep" "$current"
   elif [[ $first == model && $COMP_CWORD -eq 2 ]]; then
@@ -30,6 +36,18 @@ _howto() {
   elif [[ $first == server && $COMP_CWORD -eq 2 ]]; then
     _howto_complete_words "status stop --json --help" "$current"
   elif [[ $first == server && ( $second == status || $second == stop ) ]]; then
+    _howto_complete_words "--json" "$current"
+  elif [[ $first == shell && $COMP_CWORD -eq 2 ]]; then
+    _howto_complete_words "init enable disable status --help" "$current"
+  elif [[ $first == shell && $second == init && $COMP_CWORD -eq 3 ]]; then
+    _howto_complete_words "zsh bash fish" "$current"
+  elif [[ $first == shell && ( $second == enable || $second == disable ) ]]; then
+    if [[ $previous == --shell ]]; then
+      _howto_complete_words "zsh bash fish" "$current"
+    else
+      _howto_complete_words "--shell" "$current"
+    fi
+  elif [[ $first == shell && $second == status ]]; then
     _howto_complete_words "--json" "$current"
   elif [[ $first == config && $COMP_CWORD -eq 2 ]]; then
     _howto_complete_words "list path get set unset --json --help" "$current"

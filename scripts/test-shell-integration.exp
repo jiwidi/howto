@@ -1,0 +1,331 @@
+#!/usr/bin/env expect -f
+
+# Exercise the interactive shell adapters through a real pseudo-terminal. The
+# fake `howto` command below implements only the one-shot `shell take` protocol,
+# which keeps this test independent from model downloads and user state.
+
+set timeout 10
+log_user 0
+
+set project_root [file normalize [file join [file dirname [info script]] ..]]
+set temp_root_base "/tmp"
+if {[info exists env(TMPDIR)] && $env(TMPDIR) ne ""} {
+    set temp_root_base $env(TMPDIR)
+}
+set temp_root [file join $temp_root_base "howto-shell-test.[pid].[clock clicks]"]
+if {[catch {file mkdir $temp_root} mkdir_error]} {
+    puts stderr "FAIL: could not create temporary directory: $mkdir_error"
+    exit 1
+}
+set fake_bin [file join $temp_root bin]
+set pending_file [file join $temp_root pending]
+set take_log [file join $temp_root take.log]
+set native_file [file join $temp_root native-target-file]
+file mkdir $fake_bin
+
+proc write_text {path contents} {
+    set channel [open $path w]
+    puts -nonewline $channel $contents
+    close $channel
+}
+
+proc cleanup {} {
+    global spawn_id temp_root
+    if {[info exists spawn_id]} {
+        catch {send -- "\003"}
+        catch {close}
+        catch {wait}
+    }
+    catch {file delete -force -- $temp_root}
+}
+
+proc fail {message} {
+    cleanup
+    puts stderr "FAIL: $message"
+    exit 1
+}
+
+proc buffered_output {} {
+    global expect_out
+    if {[info exists expect_out(buffer)]} {
+        return $expect_out(buffer)
+    }
+    return "<no buffered output>"
+}
+
+proc find_program {name} {
+    set result [auto_execok $name]
+    if {[llength $result] == 0} {
+        return ""
+    }
+    return [lindex $result 0]
+}
+
+proc bash_version {executable} {
+    global expect_out spawn_id
+
+    spawn -noecho $executable --noprofile --norc -c {
+        printf 'HOWTO_BASH_VERSION:%s.%s\n' "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"
+    }
+    set version ""
+    expect {
+        -re {HOWTO_BASH_VERSION:([0-9]+)\.([0-9]+)} {
+            set version "$expect_out(1,string).$expect_out(2,string)"
+            exp_continue
+        }
+        eof {}
+        timeout {
+            fail "could not determine Bash version; output: [buffered_output]"
+        }
+    }
+    catch {wait}
+    unset -nocomplain spawn_id
+    return $version
+}
+
+proc expect_prompt {shell_name} {
+    global expect_out
+    expect {
+        -exact "HOWTO-TEST> " {
+            return
+        }
+        timeout {
+            fail "$shell_name did not return to its prompt; output: [buffered_output]"
+        }
+        eof {
+            fail "$shell_name exited before displaying its prompt; output: [buffered_output]"
+        }
+    }
+}
+
+proc expect_inserted {shell_name command} {
+    global expect_out
+    expect {
+        -exact $command {
+            return
+        }
+        timeout {
+            fail "$shell_name did not display the pending command; output: [buffered_output]"
+        }
+        eof {
+            fail "$shell_name exited while inserting the pending command; output: [buffered_output]"
+        }
+    }
+}
+
+proc stage_pending {command} {
+    global pending_file
+    write_text $pending_file "$command\n"
+}
+
+proc take_call_count {} {
+    global take_log
+    if {![file exists $take_log]} {
+        return 0
+    }
+    set take_channel [open $take_log r]
+    set contents [string trim [read $take_channel]]
+    close $take_channel
+    if {$contents eq ""} {
+        return 0
+    }
+    return [llength [split $contents "\n"]]
+}
+
+proc start_shell {shell_name executable adapter} {
+    global env spawn_id
+
+    set env(HOWTO_TEST_ADAPTER) $adapter
+    set env(HOWTO_TEST_PROMPT) "HOWTO-TEST> "
+    switch -- $shell_name {
+        zsh {
+            spawn -noecho $executable -f
+            send -- "PROMPT=\$HOWTO_TEST_PROMPT; RPROMPT=\r"
+        }
+        bash {
+            spawn -noecho $executable --noprofile --norc
+            send -- "unset PROMPT_COMMAND; PS1=\$HOWTO_TEST_PROMPT\r"
+        }
+        fish {
+            # TERM=dumb prevents fish 4 from waiting for terminal-query replies
+            # that Expect's minimal pseudo-terminal does not synthesize.
+            set previous_term $env(TERM)
+            set env(TERM) dumb
+            spawn -noecho $executable --no-config --interactive
+            set env(TERM) $previous_term
+            expect {
+                -glob {*> *} {}
+                timeout {
+                    fail "$shell_name did not finish interactive startup; output: [buffered_output]"
+                }
+                eof {
+                    fail "$shell_name exited during interactive startup; output: [buffered_output]"
+                }
+            }
+            send -- "function fish_prompt; printf '%s' \$HOWTO_TEST_PROMPT; end\r"
+        }
+        default {
+            fail "unknown test shell: $shell_name"
+        }
+    }
+
+    expect_prompt $shell_name
+    send -- "source \"\$HOWTO_TEST_ADAPTER\"\r"
+    expect_prompt $shell_name
+}
+
+proc stop_shell {shell_name} {
+    global expect_out spawn_id
+    send -- "exit\r"
+    expect {
+        eof {}
+        timeout {
+            fail "$shell_name did not exit cleanly; output: [buffered_output]"
+        }
+    }
+    catch {wait}
+    unset -nocomplain spawn_id
+}
+
+proc run_adapter_test {shell_name executable adapter} {
+    global pending_file native_file take_log temp_root
+
+    set first_marker [file join $temp_root "$shell_name-first-executed"]
+    set second_marker [file join $temp_root "$shell_name-second-executed"]
+    set first_command "touch $first_marker"
+    set second_command "touch $second_marker"
+    set native_prefix [string range $native_file 0 end-4]
+    file delete -force -- $take_log
+
+    start_shell $shell_name $executable $adapter
+
+    # An empty-line Tab consumes and displays the suggestion, but it must not
+    # accept the line. Ctrl-C then cancels the inserted buffer.
+    stage_pending $first_command
+    send -- "\t"
+    expect_inserted $shell_name $first_command
+    after 250
+    if {[file exists $first_marker]} {
+        fail "$shell_name executed a command while inserting it"
+    }
+    if {[file exists $pending_file]} {
+        fail "$shell_name did not consume the pending command"
+    }
+    send -- "\003"
+    expect_prompt $shell_name
+    if {[file exists $first_marker]} {
+        fail "$shell_name executed a command while cancelling the buffer"
+    }
+
+    # With no pending command and a non-empty buffer, Tab must retain native
+    # completion. Completing this unique filename makes `cat` print the token.
+    send -- "cat $native_prefix\t\r"
+    expect {
+        -exact "HOWTO_NATIVE_COMPLETION_OK" {}
+        timeout {
+            fail "$shell_name did not use native completion without a pending command; output: [buffered_output]"
+        }
+        eof {
+            fail "$shell_name exited during native completion; output: [buffered_output]"
+        }
+    }
+    expect_prompt $shell_name
+
+    # A non-empty buffer must also bypass HowTo when a suggestion is waiting.
+    # The suggestion remains available and can be inserted at the next empty
+    # prompt, still without execution.
+    stage_pending $second_command
+    send -- "cat $native_prefix\t\r"
+    expect {
+        -exact "HOWTO_NATIVE_COMPLETION_OK" {}
+        timeout {
+            fail "$shell_name replaced a non-empty buffer instead of using native completion; output: [buffered_output]"
+        }
+        eof {
+            fail "$shell_name exited while completing a non-empty buffer; output: [buffered_output]"
+        }
+    }
+    expect_prompt $shell_name
+    if {![file exists $pending_file]} {
+        fail "$shell_name consumed the pending command from a non-empty buffer"
+    }
+    if {[take_call_count] != 1} {
+        fail "$shell_name requested a pending command from a non-empty buffer"
+    }
+
+    send -- "\t"
+    expect_inserted $shell_name $second_command
+    after 250
+    if {[file exists $second_marker]} {
+        fail "$shell_name executed the second inserted command"
+    }
+    send -- "\003"
+    expect_prompt $shell_name
+    if {[file exists $second_marker]} {
+        fail "$shell_name executed the second command while cancelling the buffer"
+    }
+
+    set calls [take_call_count]
+    if {$calls != 2} {
+        fail "$shell_name made $calls pending-command requests; expected exactly two empty-line requests"
+    }
+
+    stop_shell $shell_name
+    puts "PASS: $shell_name shell adapter"
+}
+
+set fake_howto [file join $fake_bin howto]
+write_text $fake_howto {#!/bin/sh
+if [ "$#" -ne 2 ] || [ "$1" != "shell" ] || [ "$2" != "take" ]; then
+    exit 64
+fi
+printf '%s\n' "$*" >> "$HOWTO_TEST_TAKE_LOG"
+if [ ! -s "$HOWTO_TEST_PENDING" ]; then
+    exit 1
+fi
+IFS= read -r pending < "$HOWTO_TEST_PENDING" || exit 1
+rm -f -- "$HOWTO_TEST_PENDING"
+printf '%s\n' "$pending"
+}
+file attributes $fake_howto -permissions 0755
+write_text $native_file "HOWTO_NATIVE_COMPLETION_OK\n"
+
+set env(HOME) [file join $temp_root home]
+set env(ZDOTDIR) $env(HOME)
+set env(PATH) "$fake_bin:$env(PATH)"
+set env(TERM) xterm-256color
+set env(HOWTO_TEST_PENDING) $pending_file
+set env(HOWTO_TEST_TAKE_LOG) $take_log
+file mkdir $env(HOME)
+
+set tested 0
+foreach shell_name {zsh bash fish} {
+    set executable [find_program $shell_name]
+    if {$executable eq ""} {
+        puts "SKIP: $shell_name is not installed"
+        continue
+    }
+
+    if {$shell_name eq "bash"} {
+        set detected_bash_version [bash_version $executable]
+        scan $detected_bash_version "%d.%d" bash_major bash_minor
+        if {$bash_major < 4 || ($bash_major == 4 && $bash_minor < 1)} {
+            puts "SKIP: bash $detected_bash_version lacks empty-line completion support"
+            continue
+        }
+    }
+
+    set adapter [file join $project_root shell "howto.$shell_name"]
+    if {![file isfile $adapter]} {
+        fail "missing adapter: $adapter"
+    }
+    run_adapter_test $shell_name $executable $adapter
+    incr tested
+}
+
+if {$tested == 0} {
+    puts "SKIP: no supported test shell is installed"
+}
+
+cleanup
+exit 0

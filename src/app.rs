@@ -1,10 +1,14 @@
+use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use crate::cli::{self, ConfigCommand, Invocation, ModelCommand, QueryOptions, ServerCommand};
+use crate::cli::{
+    self, ConfigCommand, Invocation, ModelCommand, QueryOptions, ServerCommand, SetupOptions,
+    ShellCommand,
+};
 use crate::config::{self, Config};
 use crate::error::{Error, Result};
 use crate::execute;
@@ -14,6 +18,7 @@ use crate::paths::Paths;
 use crate::platform::Platform;
 use crate::runtime::{self, Manager};
 use crate::safety::{Assessment, Risk};
+use crate::{setup, shell};
 
 pub fn run(invocation: Invocation) -> Result<i32> {
     match invocation {
@@ -25,26 +30,29 @@ pub fn run(invocation: Invocation) -> Result<i32> {
             println!("howto {}", crate::VERSION);
             Ok(0)
         }
+        Invocation::Setup(options) => run_setup(options),
         Invocation::Query(options) => run_query(options),
         Invocation::Doctor { json, deep } => run_doctor(json, deep),
         Invocation::Model(command) => run_model(command),
         Invocation::Server(command) => run_server(command),
         Invocation::Config(command) => run_config(command),
+        Invocation::Shell(command) => run_shell(command),
     }
 }
 
 fn run_query(options: QueryOptions) -> Result<i32> {
     runtime::refuse_elevated()?;
-    let prompt = read_prompt(options.words)?;
     let paths = Paths::discover()?;
     paths.create()?;
     let config = config::load(&paths.config_file())?;
+    ensure_setup_for_query(&options, &paths, &config)?;
+    let prompt = read_prompt(options.words)?;
     let platform = Platform::current();
 
     let model_path = if config.server_url.is_some() {
         PathBuf::new()
     } else {
-        ensure_model(&config, &paths, true)?.path().to_path_buf()
+        ensure_model(&config, &paths)?.path().to_path_buf()
     };
 
     let manager = Manager::new(&config, &paths);
@@ -59,6 +67,12 @@ fn run_query(options: QueryOptions) -> Result<i32> {
         .iter()
         .map(|command| assess(command, platform))
         .collect::<Vec<_>>();
+
+    if let Err(error) = shell::discard_pending(&paths) {
+        if io::stderr().is_terminal() && !options.json && !options.quiet {
+            eprintln!("Warning: could not clear the previous Tab suggestion: {error}");
+        }
+    }
 
     if options.quiet {
         let assessment = &assessments[0];
@@ -105,6 +119,21 @@ fn run_query(options: QueryOptions) -> Result<i32> {
     let command = &generation.commands[selected];
     let assessment = &assessments[selected];
 
+    if !options.quiet
+        && !options.json
+        && !options.execute
+        && generation.commands.len() == 1
+        && io::stdout().is_terminal()
+        && io::stderr().is_terminal()
+        && matches!(assessment.risk, Risk::NoKnownRisk | Risk::Caution)
+    {
+        match store_pending_for_configured_shell(&paths, command) {
+            Ok(true) => eprintln!("Press Tab at an empty prompt to edit this command."),
+            Ok(false) => {}
+            Err(error) => eprintln!("Warning: could not prepare the Tab shortcut: {error}"),
+        }
+    }
+
     if options.copy {
         execute::copy_to_clipboard(command, platform)?;
         if !options.quiet && !options.json {
@@ -140,6 +169,22 @@ fn run_query(options: QueryOptions) -> Result<i32> {
         }
     }
     execute::run(command, &config.shell_path)
+}
+
+fn store_pending_for_configured_shell(paths: &Paths, command: &str) -> Result<bool> {
+    let _lock = setup::Lock::acquire(paths)?;
+    let Some(receipt) = setup::load(paths)? else {
+        return Ok(false);
+    };
+    let configured = receipt
+        .shell
+        .as_deref()
+        .map(str::parse::<shell::Kind>)
+        .transpose()?;
+    if shell::session_kind()? != configured || configured.is_none() {
+        return Ok(false);
+    }
+    shell::store_pending(paths, command)
 }
 
 fn read_prompt(words: Vec<String>) -> Result<String> {
@@ -274,30 +319,350 @@ fn select_command(count: usize) -> Result<usize> {
     Ok(choice - 1)
 }
 
-fn ensure_model(config: &Config, paths: &Paths, allow_prompt: bool) -> Result<ModelLocation> {
+fn ensure_setup_for_query(options: &QueryOptions, paths: &Paths, config: &Config) -> Result<()> {
+    if setup::load(paths)?.is_some() {
+        let still_complete = {
+            let _lock = setup::Lock::acquire(paths)?;
+            if let Some(mut current) = setup::load(paths)? {
+                let refresh = (|| -> Result<()> {
+                    if let Some(kind) = current
+                        .shell
+                        .as_deref()
+                        .map(str::parse::<shell::Kind>)
+                        .transpose()?
+                    {
+                        shell::refresh_adapter(paths, kind)?;
+                        if current.shell_integration_schema != Some(setup::SHELL_INTEGRATION_SCHEMA)
+                        {
+                            current.shell_integration_schema =
+                                Some(setup::SHELL_INTEGRATION_SCHEMA);
+                            setup::save(paths, &current)?;
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = refresh {
+                    if io::stderr().is_terminal() && !options.json && !options.quiet {
+                        eprintln!(
+                            "Warning: could not refresh the optional Tab integration: {error}"
+                        );
+                    }
+                }
+                true
+            } else {
+                false
+            }
+        };
+        if still_complete {
+            return Ok(());
+        }
+    }
+    if options.json || options.quiet || !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        return Err(Error::Configuration(
+            "HowTo setup has not been completed; run `howto setup` first".into(),
+        ));
+    }
+    let setup_prompt = format!(
+        "HowTo setup has not been completed. Run it now? This may download the {:.0} MiB local model. [Y/n] ",
+        DEFAULT_MODEL.size as f64 / 1_048_576.0
+    );
+    if !prompt_yes_no(&setup_prompt, true)? {
+        return Err(Error::Configuration(
+            "setup was declined; run `howto setup` when you are ready".into(),
+        ));
+    }
+    let code = run_setup_workflow(
+        paths,
+        config,
+        &SetupOptions {
+            yes: false,
+            no_shell: false,
+            shell: None,
+        },
+        true,
+    )?;
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(Error::Configuration(
+            "setup did not complete; run `howto setup` to try again".into(),
+        ))
+    }
+}
+
+fn run_setup(options: SetupOptions) -> Result<i32> {
+    runtime::refuse_elevated()?;
+    let paths = Paths::discover()?;
+    paths.create()?;
+    let config = config::load(&paths.config_file())?;
+    run_setup_workflow(&paths, &config, &options, false)
+}
+
+fn run_setup_workflow(
+    paths: &Paths,
+    config: &Config,
+    options: &SetupOptions,
+    model_download_confirmed: bool,
+) -> Result<i32> {
+    let _lock = setup::Lock::acquire(paths)?;
+    let (previous, quarantined) = setup::load_for_setup(paths)?;
+    if let Some(path) = quarantined {
+        eprintln!(
+            "Warning: moved malformed setup state to {} before repairing setup.",
+            path.display()
+        );
+    }
+
+    if let Some(url) = &config.server_url {
+        eprintln!("Using the configured provider at {url}; no local model download is needed.");
+    } else {
+        let runtime_path = runtime::resolve_llama_server(config)?;
+        if !runtime::probe_llama_server(&runtime_path) {
+            return Err(Error::Dependency(format!(
+                "{} did not pass the llama-server version check",
+                runtime_path.display()
+            )));
+        }
+        eprintln!("Runtime found at {}.", runtime_path.display());
+        let mut install_required = false;
+        match model::resolve(config, paths)? {
+            Some(ModelLocation::Managed(path)) => {
+                if model::verify_sha256(&path, DEFAULT_MODEL.sha256)? {
+                    eprintln!("Model is already verified at {}.", path.display());
+                } else {
+                    eprintln!(
+                        "The managed model at {} failed verification and will be replaced.",
+                        path.display()
+                    );
+                    install_required = true;
+                }
+            }
+            Some(ModelLocation::Packaged(path)) => {
+                if !model::verify_sha256(&path, DEFAULT_MODEL.sha256)? {
+                    return Err(Error::Model(format!(
+                        "the packaged model at {} failed SHA-256 verification; repair or remove that package before setup",
+                        path.display()
+                    )));
+                }
+                eprintln!("Packaged model is verified at {}.", path.display());
+            }
+            Some(location @ ModelLocation::Configured(_)) => {
+                eprintln!(
+                    "Model is already available at {}.",
+                    location.path().display()
+                );
+            }
+            None => install_required = true,
+        }
+        if install_required {
+            let confirmed = options.yes
+                || model_download_confirmed
+                || (interactive()
+                    && prompt_yes_no(
+                        &format!(
+                            "Download the local model ({:.0} MiB)? [Y/n] ",
+                            DEFAULT_MODEL.size as f64 / 1_048_576.0
+                        ),
+                        true,
+                    )?);
+            if !confirmed {
+                eprintln!("Setup was not completed.");
+                return Ok(1);
+            }
+            install_model(paths)?;
+        }
+    }
+
+    let previous_shell = previous
+        .as_ref()
+        .and_then(|receipt| receipt.shell.as_deref())
+        .map(str::parse::<shell::Kind>)
+        .transpose()?;
+    let mut shell_changes = Vec::new();
+    let previous_startup_files = previous
+        .as_ref()
+        .map(|receipt| receipt.shell_startup_files.as_slice())
+        .unwrap_or_default();
+    let mut chosen_startup_files = Vec::new();
+    let chosen_shell = if options.no_shell {
+        for kind in shell::Kind::ALL {
+            let recorded = if previous_shell == Some(kind) {
+                previous_startup_files
+            } else {
+                &[]
+            };
+            let has_artifacts = if previous_shell == Some(kind) {
+                true
+            } else {
+                match shell::has_managed_artifacts(paths, kind) {
+                    Ok(value) => value,
+                    Err(error) => return Err(with_shell_rollback(error, &shell_changes)),
+                }
+            };
+            if previous_shell == Some(kind) || has_artifacts {
+                let result = match shell::disable_recorded(paths, kind, recorded) {
+                    Ok(result) => result,
+                    Err(error) => return Err(with_shell_rollback(error, &shell_changes)),
+                };
+                eprintln!("Removed the HowTo Tab integration for {kind}.");
+                shell_changes.push(result);
+            }
+        }
+        if let Err(error) = shell::purge_pending(paths) {
+            return Err(with_shell_rollback(error, &shell_changes));
+        }
+        None
+    } else {
+        let explicit_shell = options
+            .shell
+            .as_deref()
+            .map(str::parse::<shell::Kind>)
+            .transpose()?;
+        let candidate = if let Some(kind) = explicit_shell.or(previous_shell) {
+            Some(kind)
+        } else if options.yes {
+            detect_optional_shell()?
+        } else if interactive() {
+            if prompt_yes_no(
+                "Enable Tab to insert your last generated command at an empty prompt? [Y/n] ",
+                true,
+            )? {
+                detect_optional_shell()?
+            } else {
+                None
+            }
+        } else {
+            return Err(Error::Configuration(
+                "non-interactive setup needs `--yes`, `--no-shell`, or `--shell <zsh|bash|fish>`"
+                    .into(),
+            ));
+        };
+        if let Some(kind) = candidate {
+            let recorded = if previous_shell == Some(kind) {
+                previous_startup_files
+            } else {
+                &[]
+            };
+            match shell::enable_recorded(paths, kind, recorded) {
+                Ok(result) => {
+                    let changed = result.changed;
+                    let startup_files = result.startup_files.clone();
+                    let backup_files = result.backup_files.clone();
+                    chosen_startup_files.clone_from(&startup_files);
+                    shell_changes.push(result);
+                    if let Some(previous_kind) = previous_shell.filter(|previous| *previous != kind)
+                    {
+                        match shell::disable_recorded(paths, previous_kind, previous_startup_files)
+                        {
+                            Ok(disabled) => {
+                                shell_changes.push(disabled);
+                                eprintln!(
+                                    "Disabled the previous Tab integration for {previous_kind}."
+                                );
+                            }
+                            Err(error) => {
+                                return Err(with_shell_rollback(error, &shell_changes));
+                            }
+                        }
+                    }
+                    if changed {
+                        eprintln!("Enabled context-aware Tab integration for {kind}.");
+                        for startup_file in &startup_files {
+                            eprintln!("  Startup file: {}", startup_file.display());
+                        }
+                        for backup in &backup_files {
+                            eprintln!("Previous startup file backed up to {}.", backup.display());
+                        }
+                    } else {
+                        eprintln!("Tab integration is already configured for {kind}.");
+                    }
+                    Some(kind)
+                }
+                Err(Error::Dependency(message))
+                    if explicit_shell.is_none() && previous_shell.is_none() =>
+                {
+                    eprintln!("Tab integration was skipped: {message}");
+                    None
+                }
+                Err(error) => return Err(error),
+            }
+        } else {
+            None
+        }
+    };
+
+    let mut new_receipt = setup::Receipt::new(None);
+    new_receipt.set_shell(chosen_shell.map(shell::Kind::name), chosen_startup_files);
+    if let Err(error) = setup::save(paths, &new_receipt) {
+        return Err(with_shell_rollback(error, &shell_changes));
+    }
+    eprintln!("HowTo setup is complete.");
+    if chosen_shell.is_some() && env::var_os(shell::SESSION_ENV).is_none() {
+        eprintln!("Open a new terminal to activate the Tab shortcut.");
+    }
+    Ok(0)
+}
+
+fn with_shell_rollback(error: Error, changes: &[shell::EnableResult]) -> Error {
+    let mut failures = Vec::new();
+    for change in changes.iter().rev() {
+        if let Err(rollback) = change.rollback() {
+            failures.push(rollback.to_string());
+        }
+    }
+    if failures.is_empty() {
+        error
+    } else {
+        Error::Configuration(format!(
+            "{error}; restoring the previous shell integration also failed: {}",
+            failures.join("; ")
+        ))
+    }
+}
+
+fn prompt_yes_no(prompt: &str, default_yes: bool) -> Result<bool> {
+    if !interactive() {
+        return Err(Error::Execution(
+            "this confirmation requires an interactive terminal".into(),
+        ));
+    }
+    eprint!("{prompt}");
+    io::stderr().flush()?;
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer)? == 0 {
+        return Ok(false);
+    }
+    let answer = answer.trim().to_ascii_lowercase();
+    Ok(if answer.is_empty() {
+        default_yes
+    } else {
+        matches!(answer.as_str(), "y" | "yes")
+    })
+}
+
+fn detect_optional_shell() -> Result<Option<shell::Kind>> {
+    match shell::detect() {
+        Ok(kind) => Ok(Some(kind)),
+        Err(Error::Dependency(message)) => {
+            eprintln!("Tab integration was skipped: {message}");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn interactive() -> bool {
+    io::stdin().is_terminal() && io::stderr().is_terminal()
+}
+
+fn ensure_model(config: &Config, paths: &Paths) -> Result<ModelLocation> {
     if let Some(location) = model::resolve(config, paths)? {
         return Ok(location);
     }
-    if !allow_prompt || !io::stdin().is_terminal() || !io::stderr().is_terminal() {
-        return Err(Error::Model(format!(
-            "the local model is not installed; run `howto model install --yes` (downloads {:.0} MiB)",
-            DEFAULT_MODEL.size as f64 / 1_048_576.0
-        )));
-    }
-    eprint!(
-        "HowTo needs its local model ({:.0} MiB). Download it now? [Y/n] ",
+    Err(Error::Model(format!(
+        "the local model is unavailable; run `howto setup` to repair it (downloads {:.0} MiB if needed)",
         DEFAULT_MODEL.size as f64 / 1_048_576.0
-    );
-    io::stderr().flush()?;
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    if !matches!(
-        answer.trim().to_ascii_lowercase().as_str(),
-        "" | "y" | "yes"
-    ) {
-        return Err(Error::Model("model download declined".into()));
-    }
-    install_model(paths).map(ModelLocation::Managed)
+    )))
 }
 
 fn install_model(paths: &Paths) -> Result<PathBuf> {
@@ -477,11 +842,207 @@ fn run_server(command: ServerCommand) -> Result<i32> {
     }
 }
 
+fn run_shell(command: ShellCommand) -> Result<i32> {
+    match command {
+        ShellCommand::Init { shell: name } => {
+            let kind = name.parse::<shell::Kind>()?;
+            print!("{}", kind.adapter());
+            Ok(0)
+        }
+        ShellCommand::Take => {
+            runtime::refuse_elevated()?;
+            let paths = Paths::discover()?;
+            let _lock = setup::Lock::acquire(&paths)?;
+            let Some(receipt) = setup::load(&paths)? else {
+                return Ok(1);
+            };
+            let configured = receipt
+                .shell
+                .as_deref()
+                .map(str::parse::<shell::Kind>)
+                .transpose()?;
+            if configured.is_none() || shell::session_kind()? != configured {
+                return Ok(1);
+            }
+            if let Some(command) = shell::take_pending(&paths)? {
+                println!("{command}");
+                Ok(0)
+            } else {
+                Ok(1)
+            }
+        }
+        ShellCommand::Enable { shell: name } => {
+            runtime::refuse_elevated()?;
+            let paths = Paths::discover()?;
+            paths.create()?;
+            let _lock = setup::Lock::acquire(&paths)?;
+            let Some(mut receipt) = setup::load(&paths)? else {
+                return Err(Error::Configuration(
+                    "run `howto setup` before enabling shell integration".into(),
+                ));
+            };
+            let kind = name
+                .as_deref()
+                .map(str::parse::<shell::Kind>)
+                .transpose()?
+                .unwrap_or(shell::detect()?);
+            let previous = receipt
+                .shell
+                .as_deref()
+                .map(str::parse::<shell::Kind>)
+                .transpose()?;
+            let previous_startup_files = receipt.shell_startup_files.clone();
+            let recorded = if previous == Some(kind) {
+                previous_startup_files.as_slice()
+            } else {
+                &[]
+            };
+            let result = shell::enable_recorded(&paths, kind, recorded)?;
+            let changed = result.changed;
+            let startup_files = result.startup_files.clone();
+            let backup_files = result.backup_files.clone();
+            let mut shell_changes = vec![result];
+            if let Some(previous) = previous.filter(|previous| *previous != kind) {
+                match shell::disable_recorded(&paths, previous, &previous_startup_files) {
+                    Ok(disabled) => {
+                        shell_changes.push(disabled);
+                        println!("Disabled the previous Tab integration for {previous}.");
+                    }
+                    Err(error) => {
+                        return Err(with_shell_rollback(error, &shell_changes));
+                    }
+                }
+            }
+            receipt.set_shell(Some(kind.name()), startup_files.clone());
+            if let Err(error) = setup::save(&paths, &receipt) {
+                return Err(with_shell_rollback(error, &shell_changes));
+            }
+            println!(
+                "Tab integration {} for {kind}.",
+                if changed {
+                    "enabled"
+                } else {
+                    "already enabled"
+                }
+            );
+            for startup_file in &startup_files {
+                println!("Startup file: {}", startup_file.display());
+            }
+            for backup in &backup_files {
+                println!("Backup: {}", backup.display());
+            }
+            if env::var_os(shell::SESSION_ENV).is_none() {
+                println!("Open a new terminal to activate it.");
+            }
+            Ok(0)
+        }
+        ShellCommand::Disable { shell: name } => {
+            runtime::refuse_elevated()?;
+            let paths = Paths::discover()?;
+            paths.create()?;
+            let _lock = setup::Lock::acquire(&paths)?;
+            let mut receipt = setup::load(&paths)?;
+            let kind = name
+                .as_deref()
+                .map(str::parse::<shell::Kind>)
+                .transpose()?
+                .or_else(|| {
+                    receipt
+                        .as_ref()
+                        .and_then(|state| state.shell.as_deref())
+                        .and_then(|value| value.parse().ok())
+                })
+                .unwrap_or(shell::detect()?);
+            let recorded_startup_files = receipt
+                .as_ref()
+                .filter(|state| state.shell.as_deref() == Some(kind.name()))
+                .map(|state| state.shell_startup_files.as_slice())
+                .unwrap_or_default();
+            let result = shell::disable_recorded(&paths, kind, recorded_startup_files)?;
+            let changed = result.changed;
+            let backup_files = result.backup_files.clone();
+            if let Some(state) = &mut receipt {
+                if state.shell.as_deref() == Some(kind.name()) {
+                    state.set_shell(None, Vec::new());
+                    if let Err(error) = setup::save(&paths, state) {
+                        return Err(with_shell_rollback(error, std::slice::from_ref(&result)));
+                    }
+                }
+            }
+            println!(
+                "Tab integration {} for {kind}.",
+                if changed {
+                    "disabled"
+                } else {
+                    "was not enabled"
+                }
+            );
+            for backup in &backup_files {
+                println!("Backup: {}", backup.display());
+            }
+            Ok(0)
+        }
+        ShellCommand::Status { json } => {
+            let paths = Paths::discover()?;
+            let receipt = setup::load(&paths)?;
+            let configured_shell = receipt
+                .as_ref()
+                .and_then(|state| state.shell.as_deref())
+                .map(str::parse::<shell::Kind>)
+                .transpose()?;
+            let enabled = configured_shell.is_some_and(|kind| {
+                shell::is_enabled_at(
+                    &paths,
+                    kind,
+                    receipt
+                        .as_ref()
+                        .map(|state| state.shell_startup_files.as_slice())
+                        .unwrap_or_default(),
+                )
+            });
+            let active = enabled
+                && shell::session_kind()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|kind| Some(kind) == configured_shell);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "setup_complete": receipt.is_some(),
+                        "shell": configured_shell.map(shell::Kind::name),
+                        "configured": enabled,
+                        "active_in_this_shell": active,
+                    }))?
+                );
+            } else {
+                println!(
+                    "Tab integration: {}",
+                    if enabled {
+                        "configured"
+                    } else {
+                        "not configured"
+                    }
+                );
+                if let Some(kind) = configured_shell {
+                    println!("Shell: {kind}");
+                }
+                println!(
+                    "Current shell: {}",
+                    if active { "active" } else { "not active" }
+                );
+            }
+            Ok(0)
+        }
+    }
+}
+
 fn run_doctor(json_output: bool, deep: bool) -> Result<i32> {
     runtime::refuse_elevated()?;
     let paths = Paths::discover()?;
     paths.create()?;
     let config = config::load(&paths.config_file())?;
+    let setup_complete = setup::load(&paths)?.is_some();
     let external = config.server_url.is_some();
     let model = if external {
         None
@@ -510,14 +1071,16 @@ fn run_doctor(json_output: bool, deep: bool) -> Result<i32> {
     let manager = Manager::new(&config, &paths);
     let provider_healthy = manager.configured_provider_healthy()?;
     let server = manager.status()?;
-    let ready = provider_healthy.unwrap_or_else(|| {
+    let provider_ready = provider_healthy.unwrap_or_else(|| {
         model.is_some() && runtime_usable == Some(true) && model_verified != Some(false)
     });
+    let ready = setup_complete && provider_ready;
     if json_output {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "ready": ready,
+                "setup_complete": setup_complete,
                 "version": crate::VERSION,
                 "platform": Platform::current().name(),
                 "provider": if external { "configured" } else { "local" },
@@ -533,6 +1096,14 @@ fn run_doctor(json_output: bool, deep: bool) -> Result<i32> {
         );
     } else {
         println!("HowTo {} — {}", crate::VERSION, Platform::current().name());
+        println!(
+            "Setup:   {}",
+            if setup_complete {
+                "complete"
+            } else {
+                "incomplete"
+            }
+        );
         if let Some(url) = &config.server_url {
             println!("Provider: configured endpoint {url}");
             println!(

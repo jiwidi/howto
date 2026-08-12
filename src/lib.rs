@@ -10,6 +10,8 @@ pub mod paths;
 pub mod platform;
 pub mod runtime;
 pub mod safety;
+pub mod setup;
+pub mod shell;
 
 pub const NAME: &str = "HowTo";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

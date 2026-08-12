@@ -8,6 +8,37 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-12
+
+### Added
+
+- Add a required, idempotent `howto setup` workflow that verifies the local
+  runtime, securely installs or reuses the model, and records completion only
+  after onboarding finishes. Interactive first queries offer to start setup;
+  machine-oriented and piped queries fail without consuming input.
+- Add opt-in, product-managed zsh, Bash, and fish integration. After a normal
+  single-result query, Tab at an empty prompt inserts the session's pending
+  `NO_KNOWN_RISK` or `CAUTION` command into the editable buffer without
+  submitting it; normal completion remains unchanged in other contexts.
+- Add `howto shell status`, `enable`, `disable`, and diagnostic `init`, plus
+  embedded, versioned adapters that refresh after upgrades without depending
+  on Homebrew Cellar paths. Bash integration supports Bash 4.1 and newer.
+
+### Security
+
+- Keep pending commands owner-only, single-use, per-shell-session, bounded to
+  ten minutes, control-character-free, and unavailable for `DANGER` or
+  `UNKNOWN` results. Shell startup changes are marked, backed up, symlink-
+  checked, serialized, atomically replaced, reversible, and rolled back on
+  partial failures.
+
+### Changed
+
+- Move the initial model download out of ad-hoc query handling and into setup.
+  Existing verified models and configured providers are reused, while local
+  runtime and packaged-model integrity are checked before setup is recorded.
+- Make `doctor` report setup completion and require it for overall readiness.
+
 ## [0.1.1] - 2026-08-11
 
 ### Fixed
@@ -82,6 +113,7 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until
   reference implementation audit, security policy, privacy disclosure,
   architecture, and troubleshooting documentation.
 
-[Unreleased]: https://github.com/jiwidi/howto/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/jiwidi/howto/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/jiwidi/howto/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/jiwidi/howto/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jiwidi/howto/releases/tag/v0.1.0

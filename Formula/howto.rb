@@ -3,7 +3,8 @@ class Howto < Formula
   homepage "https://github.com/jiwidi/howto"
   license "Apache-2.0"
 
-  # The HEAD spec bootstraps the tap before the first stable release:
+  # Release automation injects the immutable stable URL and checksum into this
+  # source template. The HEAD spec remains available for development builds:
   #   brew install --HEAD jiwidi/tap/howto
   # Release automation adds an immutable source URL and checksum so the normal
   # one-command install becomes:
@@ -45,9 +46,22 @@ class Howto < Formula
     assert_path_exists zsh_completion/"_howto"
 
     ENV["HOWTO_HOME"] = testpath
+    (testpath/"home").mkpath
+    ENV["HOME"] = (testpath/"home").to_s
+    ENV["XDG_CONFIG_HOME"] = (testpath/"home/.config").to_s
+    ENV.delete("ZDOTDIR")
     ENV.delete("HOWTO_MODEL")
     ENV.delete("HOWTO_PACKAGED_MODEL")
     model_status = shell_output("#{bin}/howto model status --json", 1)
     assert_match '"installed": false', model_status
+    shell_status = shell_output("#{bin}/howto shell status --json")
+    assert_match '"setup_complete": false', shell_status
+    assert_match "HOWTO_SHELL_SESSION", shell_output("#{bin}/howto shell init zsh")
+
+    system bin/"howto", "config", "set", "server_url", "https://provider.example"
+    system bin/"howto", "setup", "--yes", "--no-shell"
+    shell_status = shell_output("#{bin}/howto shell status --json")
+    assert_match '"setup_complete": true', shell_status
+    assert_match '"shell": null', shell_status
   end
 end

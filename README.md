@@ -20,18 +20,10 @@ still change before the first stable release.
 
 ## Install
 
-Once the tap formula is published, installation is one command; Homebrew adds
-the tap automatically:
+Installation is one command; Homebrew adds the tap automatically:
 
 ```sh
 brew install jiwidi/tap/howto
-```
-
-Until the first versioned formula is published in the tap, install the current
-`main` branch instead:
-
-```sh
-brew install --HEAD jiwidi/tap/howto
 ```
 
 The formula installs the native `howto` executable, `llama.cpp`, a manual page,
@@ -47,21 +39,40 @@ structural verification but are not Developer ID signed or notarized, so
 macOS users should prefer the Homebrew source install. Standalone archives do
 not bundle `llama-server` or the model.
 
-On the first interactive query, HowTo offers to download the pinned local
-model (about 940 MiB). The download can resume and is installed only after its
-size and SHA-256 digest match the built-in manifest:
+Run setup once after installation. It verifies the runtime, downloads the
+pinned local model (about 940 MiB), and optionally enables context-aware Tab
+insertion for zsh, Bash, or fish. The download can resume and is installed only
+after its size and SHA-256 digest match the built-in manifest:
 
 ```console
-$ howto "show hidden files"
-HowTo needs its local model (940 MiB). Download it now? [Y/n]
+$ howto setup
+Runtime found at /opt/homebrew/bin/llama-server.
+Download the local model (940 MiB)? [Y/n]
+Enable Tab to insert your last generated command at an empty prompt? [Y/n]
+HowTo setup is complete.
 ```
 
-For an unattended setup, install the model explicitly:
+Open a new terminal after enabling the integration. For unattended setup, use:
 
 ```sh
-howto model install --yes
+howto setup --yes
 howto doctor --deep
 ```
+
+HowTo writes a marked source block to the selected shell's startup file(s) and
+stores the embedded adapter in its private data directory. Bash uses both
+`~/.bashrc` and the active login file (`.bash_profile`, `.bash_login`, or
+`.profile`); zsh and fish use their configured startup locations. Existing
+files are backed up before an atomic edit, and the exact managed paths are
+recorded so a later disable still cleans them up if shell settings move.
+
+Use `howto setup --no-shell` to complete onboarding without an integration (and
+remove any prior HowTo-managed hooks), or `howto setup --shell zsh|bash|fish`
+to select one explicitly.
+Setup is idempotent and uses an existing verified model or configured provider
+without downloading another model. A normal query made before setup offers to
+run it interactively; non-interactive queries fail with an instruction instead
+of consuming stdin or downloading data unexpectedly.
 
 The model is downloaded from Hugging Face; prompts are not sent there.
 
@@ -76,6 +87,25 @@ howto -n 3 "show folders using the most disk space"
 howto --copy "copy my current directory"
 howto --json "show which process listens on port 3000"
 ```
+
+With shell integration enabled, a successful single-command result with risk
+`NO_KNOWN_RISK` or `CAUTION` is available once at the next empty prompt. Press
+Tab to insert it into the editable command line without submitting it:
+
+```console
+$ howto "free port 8080"
+lsof -tiTCP:8080 -sTCP:LISTEN | xargs kill
+Press Tab at an empty prompt to edit this command.
+$ lsof -tiTCP:8080 -sTCP:LISTEN | xargs kill█
+```
+
+Tab keeps its normal completion behavior on a nonempty prompt and when no fresh
+suggestion is waiting. The pending suggestion is private to that shell session,
+expires after ten minutes, and is deleted when inserted. Bash integration uses
+the empty-line completion API available in Bash 4.1 and newer; macOS's default
+zsh is fully supported, while the legacy system Bash 3.2 is left unchanged.
+HowTo never presses Enter—the inserted command remains untrusted text for you
+to inspect and edit.
 
 Run `howto` with no request for an interactive prompt, or pipe a UTF-8 request on
 stdin:
@@ -93,13 +123,15 @@ howto -- "--help in tar"
 ```
 
 A leading management word is reserved under explicit rules: `help` and
-`version` dispatch only when alone; `doctor` dispatches when alone or followed
-by an option; and `model`, `server`, and `config` dispatch when alone or
-followed by a documented action or option. Once management parsing is selected,
-all remaining arguments are validated strictly. Natural phrases such as
-`howto help me find large files` and `howto model the current directory` remain
-queries. Use `--` to force query parsing for a management-shaped request, for
-example `howto -- "model status for this project"`.
+`version` dispatch only when alone; `setup` and `doctor` dispatch when alone or
+followed by an option; `model`, `server`, and `config` also dispatch when alone,
+or when followed by a documented action or option; and `shell` requires an
+action or option. Once management parsing is selected, all remaining arguments
+are validated strictly. Natural phrases such
+as `howto help me find large files`, `howto setup a venv`, and
+`howto shell into a container` remain queries. Use `--` to force query parsing
+for a management-shaped request, for example
+`howto -- "model status for this project"`.
 
 ### Query options
 
@@ -118,9 +150,14 @@ physical command line no longer than 4096 bytes.
 ### Commands
 
 ```text
+howto setup [-y|--yes] [--no-shell|--shell zsh|bash|fish]
 howto doctor [--deep] [--json]
 howto model [status [--deep] [--json] | install [-y|--yes]]
 howto server [status [--json] | stop [--json]]
+howto shell status [--json]
+howto shell enable [--shell zsh|bash|fish]
+howto shell disable [--shell zsh|bash|fish]
+howto shell init zsh|bash|fish
 howto config [list [--json] | path | get KEY | set KEY VALUE | unset KEY]
 ```
 
@@ -164,7 +201,9 @@ are supported through `shell_path`.
 
 Copying is not approval: `--copy` can copy a `CAUTION`, `DANGER`, or `UNKNOWN`
 command so that you can inspect or edit it elsewhere. Always review before
-pasting or running it. See [SECURITY.md](SECURITY.md) for the threat model.
+pasting or running it. Tab insertion is likewise not approval and deliberately
+does not submit the line. `DANGER` and `UNKNOWN` results are not made available
+to the Tab integration. See [SECURITY.md](SECURITY.md) for the threat model.
 
 ## Local model and runtime
 
@@ -225,6 +264,7 @@ the system temporary directory, a set `TMPDIR` must be absolute as well.
 | `HOWTO_PACKAGED_MODEL` | Add an explicit package-provided default-model candidate. |
 | `HOWTO_LLAMA_SERVER` | Override `llama_server_path`. |
 | `HOWTO_API_KEY` | Send a bearer token to a configured endpoint; it is not used as the managed local token. |
+| `HOWTO_SHELL_SESSION` | Internal per-shell identifier exported by the managed Tab adapter; do not set it manually. |
 
 ### Replaceable provider boundary
 
@@ -275,9 +315,9 @@ least one route must return a successful status; this checks a supported
 diagnostic route, not chat-completion compatibility.
 
 In local mode, `doctor` also runs the resolved `llama-server --version` with a
-ten-second deadline. Local readiness means the model is present, this runtime
-probe succeeds, and an optional deep model check did not fail; a harmless query
-is still the end-to-end inference test.
+30-second deadline. Local readiness means the model is present, this runtime
+probe succeeds, setup has completed, and an optional deep model check did not
+fail; a harmless query is still the end-to-end inference test.
 
 See [Troubleshooting](docs/TROUBLESHOOTING.md) for download, runtime, provider,
 clipboard, and execution problems. The implementation is described in

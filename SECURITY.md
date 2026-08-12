@@ -6,9 +6,8 @@ command as if it came from an untrusted person.
 
 ## Supported versions
 
-HowTo is currently pre-1.0 and has no stable release line. Security fixes are
-made on `main`. After tagged releases begin, the latest release and `main` will
-receive fixes; older pre-1.0 versions may require upgrading.
+HowTo is currently pre-1.0. Security fixes are made on `main` and released on
+the latest tagged line; older pre-1.0 versions may require upgrading.
 
 ## Report a vulnerability
 
@@ -40,6 +39,9 @@ The default path applies the following controls:
 - no generated command executes unless `--execute` was explicitly requested;
 - execution requires an interactive, exact confirmation;
 - `DANGER` and `UNKNOWN` commands are never executed by HowTo;
+- Tab integration is opt-in during setup, makes only `NO_KNOWN_RISK` and
+  `CAUTION` results available, stores at most one private command per shell
+  session, and inserts it only into an empty editable buffer without submitting;
 - `--quiet` emits only a `NO_KNOWN_RISK` result;
 - model output containing terminal control bytes, multiple lines, malformed
   fences, excessive length, or a token-limit finish is rejected;
@@ -94,7 +96,16 @@ separator, or transaction system, and it cannot undo a command.
 Displaying or copying a command is not execution, but it is also not a safety
 approval. `--copy` intentionally allows all risk classes so users can inspect
 or edit the output. Pasting that command into a shell bypasses HowTo's
-execution gate.
+execution gate. Tab insertion likewise bypasses the `--execute` confirmation
+gate after the user presses Enter. The adapter never submits the line, and it
+does not offer `DANGER` or `UNKNOWN` results, but inserted commands remain
+untrusted and must be reviewed before execution.
+
+Setup installs a small, auditable adapter in HowTo's private data directory and
+adds a marked source block to the selected shell startup file(s). Bash uses
+`.bashrc` plus its active login file. HowTo refuses unsafe or malformed files,
+writes changes atomically, backs up each existing file, and records the exact
+managed paths for reliable cleanup. Disable it with `howto shell disable`.
 
 ## Provider and transport security
 

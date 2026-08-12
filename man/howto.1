@@ -1,4 +1,4 @@
-.TH HOWTO 1 "August 11, 2026" "HowTo" "User Commands"
+.TH HOWTO 1 "August 12, 2026" "HowTo" "User Commands"
 .SH NAME
 howto \- turn plain English into a shell command locally
 .SH SYNOPSIS
@@ -7,6 +7,9 @@ howto \- turn plain English into a shell command locally
 .br
 .B howto
 .RI command
+.br
+.B howto setup
+.RI [ options ]
 .SH DESCRIPTION
 .B HowTo
 runs a local GGUF model through llama.cpp and prints one shell command suited to
@@ -14,10 +17,25 @@ the current platform. It targets macOS with zsh and BSD tools first, and
 GNU/Linux with bash. Requests do not leave the machine when using the default
 provider.
 .PP
+Query generation requires the one-time
+.B howto setup
+workflow. Setup verifies the runtime, installs or reuses the model, and can
+configure context-aware Tab insertion for zsh, Bash, or fish. An interactive
+query offers to start missing setup. Non-interactive queries fail with an
+instruction instead of prompting or consuming request input.
+.PP
+When the shell integration is enabled, a successful single-result command
+classified as NO_KNOWN_RISK or CAUTION is available once in that shell session.
+Pressing Tab at a completely empty prompt inserts it into the editable buffer
+without submitting it. Tab keeps its normal completion behavior otherwise.
+Pending commands become unavailable after ten minutes. Bash integration
+requires Bash 4.1 or newer; the default macOS zsh is supported.
+.PP
 The words help and version select management commands when alone. Doctor
-selects management parsing when alone or followed by an option. Model, server,
-and config do so when alone or followed by a documented action or option. Once
-selected, all remaining management arguments are validated strictly.
+and setup select management parsing when alone or followed by an option. Model,
+server, and config also select it when alone, or when followed by a documented
+action or option. Shell requires a documented action or option.
+Once selected, all remaining management arguments are validated strictly.
 Use
 .B --
 to force query parsing for natural language with a management-shaped prefix.
@@ -61,11 +79,23 @@ Show help and exit.
 Show the HowTo version and exit.
 .SH COMMANDS
 .TP
+.B setup [-y|--yes] [--no-shell|--shell zsh|bash|fish]
+Perform or repair required onboarding. In local mode, resolve and probe
+llama-server before downloading, resuming, and verifying the pinned model.
+Configured-provider mode skips the local model. By default, interactive setup
+asks whether to install the Tab integration. Use
+.B --yes
+to accept setup prompts,
+.B --no-shell
+to complete setup without integration and remove prior managed hooks, or
+.B --shell
+to choose an integration explicitly. Open a new terminal after enabling it.
+.TP
 .B doctor [--json] [--deep]
-Inspect configuration, model, llama-server, and resident-server status. For a
-configured provider, try GET /health and then GET /v1/models, using the
+Inspect setup, configuration, model, llama-server, and resident-server status.
+For a configured provider, try GET /health and then GET /v1/models, using the
 configured bearer token when present; this does not test chat completion. In
-local mode, require a successful, three-second llama-server --version probe.
+local mode, require a successful, 30-second llama-server --version probe.
 .TP
 .B model [status] [--json] [--deep]
 Inspect the installed model and optionally verify a managed or packaged copy
@@ -80,6 +110,25 @@ Show resident llama-server status.
 .TP
 .B server stop [--json]
 Stop only the llama-server process recorded and validated as HowTo's.
+.TP
+.B shell status [--json]
+Show whether the Tab integration is persistently configured and active in the
+current shell.
+.TP
+.B shell enable [--shell zsh|bash|fish]
+Install or repair the embedded adapter and marked startup-file blocks. Each
+existing startup file is backed up before an atomic change. Bash manages both
+.I ~/.bashrc
+and its active login file. Requires completed setup.
+.TP
+.B shell disable [--shell zsh|bash|fish]
+Remove the selected or receipt-tracked managed startup blocks, adapter, and
+pending command state.
+.TP
+.B shell init zsh|bash|fish
+Print the embedded adapter. This is primarily a diagnostic and integration
+surface; normal users should use
+.BR "howto setup" .
 .TP
 .B config [list [--json]|path|get KEY|set KEY VALUE|unset KEY]
 Inspect or update HowTo's JSON configuration.
@@ -114,6 +163,10 @@ Use a specific llama-server executable.
 Bearer token for a configured external provider. It is removed from the
 environment of a generated command approved for execution.
 .TP
+.B HOWTO_SHELL_SESSION
+Internal non-secret per-shell identifier exported by the managed adapter. Do
+not set it manually.
+.TP
 .BR XDG_CONFIG_HOME ", " XDG_DATA_HOME ", " XDG_CACHE_HOME ", " XDG_STATE_HOME
 Linux directory overrides. A value must be absolute when set.
 .TP
@@ -126,16 +179,21 @@ value used for runtime state must be absolute.
 .SH FILES
 .TP
 .I ~/Library/Application Support/HowTo
-macOS configuration and models.
+macOS configuration, setup receipt, models, and shell adapter.
 .TP
 .I ~/.config/howto and ~/.local/share/howto
-Linux configuration and models.
+Linux configuration, setup receipt, models, and shell adapter.
+.TP
+.I $XDG_RUNTIME_DIR/howto or $TMPDIR/howto-UID
+Private server state and one-shot, session-scoped pending commands.
 .SH EXAMPLES
 .nf
+howto setup
 howto "free port 8080"
 howto find files larger than 1GB
 howto -x show my current IP address
 howto doctor --deep
+howto shell status
 .fi
 .SH EXIT STATUS
 .TP
@@ -155,4 +213,5 @@ indicates a configuration, dependency, or model error.
 indicates a server, network, or model-response error.
 .SH SEE ALSO
 .BR zsh (1),
-.BR bash (1)
+.BR bash (1),
+.BR fish (1)

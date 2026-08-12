@@ -148,7 +148,7 @@ jobs:
             LICENSE NOTICE README.md CHANGELOG.md CONTRIBUTING.md \
             PRIVACY.md SECURITY.md THIRD_PARTY_LICENSES.txt \
             "$staging/"
-          cp -R docs completions man "$staging/"
+          cp -R docs completions man shell "$staging/"
           archive_mtime="$(git show -s --format=%ct "$GITHUB_SHA")"
           scripts/create-release-archive.py \
             "$staging" \
@@ -212,7 +212,8 @@ jobs:
               PRIVACY.md SECURITY.md THIRD_PARTY_LICENSES.txt \
               docs/ATTRIBUTION.md docs/TROUBLESHOOTING.md \
               completions/howto.bash completions/howto.fish \
-              completions/_howto man/howto.1; do
+              completions/_howto man/howto.1 \
+              shell/howto.zsh shell/howto.bash shell/howto.fish; do
               tar -tzf "dist/$archive" "$root/$required" >/dev/null
             done
             archives+=("$archive")
@@ -220,7 +221,8 @@ jobs:
 
           for required in \
             Cargo.toml Cargo.lock LICENSE NOTICE README.md \
-            THIRD_PARTY_LICENSES.txt docs/ATTRIBUTION.md; do
+            THIRD_PARTY_LICENSES.txt docs/ATTRIBUTION.md \
+            shell/howto.zsh shell/howto.bash shell/howto.fish; do
             tar -tzf "dist/$source_archive" "howto-${version}/$required" >/dev/null
           done
 

@@ -82,6 +82,7 @@ impl Paths {
             &self.logs_dir,
             &self.runtime_dir,
             &self.models_dir(),
+            &self.shell_dir(),
         ] {
             create_private_directory(directory)?;
         }
@@ -101,6 +102,21 @@ impl Paths {
     #[must_use]
     pub fn model_lock_file(&self) -> PathBuf {
         self.models_dir().join(".install.lock")
+    }
+
+    #[must_use]
+    pub fn setup_state_file(&self) -> PathBuf {
+        self.config_dir.join("setup.json")
+    }
+
+    #[must_use]
+    pub fn setup_lock_file(&self) -> PathBuf {
+        self.config_dir.join(".setup.lock")
+    }
+
+    #[must_use]
+    pub fn shell_dir(&self) -> PathBuf {
+        self.data_dir.join("shell")
     }
 
     #[must_use]
@@ -210,6 +226,11 @@ mod tests {
             PathBuf::from("/tmp/howto-test/config.json")
         );
         assert_eq!(paths.models_dir(), PathBuf::from("/tmp/howto-test/models"));
+        assert_eq!(
+            paths.setup_state_file(),
+            PathBuf::from("/tmp/howto-test/setup.json")
+        );
+        assert_eq!(paths.shell_dir(), PathBuf::from("/tmp/howto-test/shell"));
         assert_eq!(
             paths.server_state_file(),
             PathBuf::from("/tmp/howto-test/run/server.json")

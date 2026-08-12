@@ -45,7 +45,7 @@ jobs:
       - name: Install completion validator
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends --yes fish zsh
+          sudo apt-get install --no-install-recommends --yes expect fish zsh
 
       - name: Validate workflows
         run: |
@@ -56,12 +56,17 @@ jobs:
       - name: Validate packaging scripts
         run: |
           bash -n scripts/render-homebrew-formula.sh
-          shellcheck scripts/render-homebrew-formula.sh completions/howto.bash
+          shellcheck \
+            scripts/render-homebrew-formula.sh \
+            completions/howto.bash shell/howto.bash
           zsh -n completions/_howto
+          zsh -n shell/howto.zsh
           fish --no-config --no-execute completions/howto.fish
+          fish --no-config --no-execute shell/howto.fish
           fish --no-config -c \
             'source completions/howto.fish; complete -C "howto model install "' \
             | grep -Fxq -- --yes
+          expect -f scripts/test-shell-integration.exp
           ruby -c Formula/howto.rb
           PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" \
             python3 -m py_compile \
@@ -141,3 +146,7 @@ jobs:
             codesign --force --sign - "$binary"
             codesign --verify --strict --verbose=2 "$binary"
           fi
+
+      - name: Test macOS shell adapter
+        if: runner.os == 'macOS'
+        run: expect -f scripts/test-shell-integration.exp

@@ -22,7 +22,7 @@ directory listings, or file contents to that inference request.
 HowTo does make ordinary outbound download requests in two situations:
 
 - Homebrew downloads HowTo, its build dependencies, and `llama.cpp`.
-- On first use, after confirmation, HowTo downloads the pinned model artifact
+- During `howto setup`, after confirmation, HowTo downloads the pinned model artifact
   from Hugging Face. This sends normal connection metadata such as your IP
   address and HTTP headers to the model host, but not your HowTo prompts.
 
@@ -64,9 +64,10 @@ howto config unset model_id
 | Data | macOS default | Linux default | Retention |
 |---|---|---|---|
 | Configuration | `~/Library/Application Support/HowTo/config.json` | `${XDG_CONFIG_HOME:-~/.config}/howto/config.json` | Until you change or remove it. |
+| Setup receipt and shell adapter | `~/Library/Application Support/HowTo/` | Config and data paths under `${XDG_CONFIG_HOME:-~/.config}/howto/` and `${XDG_DATA_HOME:-~/.local/share}/howto/` | Persists until removed; the receipt records the selected shell and exact managed startup paths. `howto shell disable` removes that adapter and its managed blocks. |
 | Managed model | `~/Library/Application Support/HowTo/models/` | `${XDG_DATA_HOME:-~/.local/share}/howto/models/` | Persists across runs and Homebrew upgrades or uninstall. |
 | Runtime log | `~/Library/Logs/HowTo/llama-server.log` | `${XDG_STATE_HOME:-~/.local/state}/howto/log/llama-server.log` | Rotated at server start after 2 MiB; at most the current log and one `.1` backup are managed. |
-| Runtime state and local token | `$XDG_RUNTIME_DIR/howto/`, or `$TMPDIR/howto-UID/` without it | `$XDG_RUNTIME_DIR/howto/`, or `$TMPDIR/howto-UID/` without it | Replaced during server lifecycle; the token is removed on a managed stop or cleanup. |
+| Runtime state, local token, and pending Tab command | `$XDG_RUNTIME_DIR/howto/`, or `$TMPDIR/howto-UID/` without it | `$XDG_RUNTIME_DIR/howto/`, or `$TMPDIR/howto-UID/` without it | Server state is replaced during its lifecycle. A pending command is session-scoped, expires after ten minutes, and is deleted when inserted. |
 | Cache directory | `~/Library/Caches/HowTo/` | `${XDG_CACHE_HOME:-~/.cache}/howto/` | Reserved for local cache data. |
 
 All of these locations can be redirected under a single absolute directory
@@ -75,7 +76,13 @@ or `TMPDIR` when used as the runtime fallback, must also be absolute. HowTo
 creates its data directories as owner-only and writes sensitive state with
 owner-only permissions.
 
-HowTo itself does not intentionally save prompt or command history. However:
+HowTo does not intentionally save prompt history or a command-history log. If
+the managed Tab integration is active, HowTo temporarily saves the most recent
+eligible command in its owner-only runtime directory. It is keyed to the shell
+session, overwritten by the next eligible result, unavailable for `DANGER` and
+`UNKNOWN` results, and atomically removed when Tab inserts it. It becomes
+unavailable after ten minutes; expired files are removed by the next shell-
+integration access or when integration is disabled. In addition:
 
 - your shell may save a request passed as command-line arguments in shell
   history;
@@ -85,6 +92,10 @@ HowTo itself does not intentionally save prompt or command history. However:
   the Homebrew runtime version;
 - terminal emulators, session recorders, CI systems, and redirected stdout or
   stderr may retain requests, generated commands, and findings;
+- the shell adapter adds a marked source block to the selected startup file(s);
+  Bash uses `.bashrc` plus its active login file. HowTo creates a backup before
+  changing each existing file, and Homebrew uninstall does not remove these
+  user-owned files or backups;
 - `--copy` places a generated command on the system clipboard, where other
   applications and clipboard-history tools may access it; clipboard helpers
   are launched without `HOWTO_API_KEY` and the same injection-sensitive
@@ -130,12 +141,14 @@ howto config path
 howto config list
 howto model status
 howto server status
+howto shell status
 ```
 
 Stop the managed server before removing its files:
 
 ```sh
 howto server stop
+howto shell disable
 ```
 
 `brew uninstall howto` removes the installed formula but intentionally does
