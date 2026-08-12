@@ -128,7 +128,10 @@ fn run_query(options: QueryOptions) -> Result<i32> {
         && matches!(assessment.risk, Risk::NoKnownRisk | Risk::Caution)
     {
         match store_pending_for_configured_shell(&paths, command) {
-            Ok(true) => eprintln!("Press Tab at an empty prompt to edit this command."),
+            Ok(true) if config.show_tab_hint => {
+                eprintln!("Press Tab at an empty prompt to edit this command.");
+            }
+            Ok(true) => {}
             Ok(false) => {}
             Err(error) => eprintln!("Warning: could not prepare the Tab shortcut: {error}"),
         }
@@ -1298,6 +1301,7 @@ fn config_value(config: &Config, key: &str) -> Result<String> {
         "context_size" => Ok(config.context_size.to_string()),
         "max_tokens" => Ok(config.max_tokens.to_string()),
         "startup_timeout_seconds" => Ok(config.startup_timeout_seconds.to_string()),
+        "show_tab_hint" => Ok(config.show_tab_hint.to_string()),
         "shell_path" => Ok(config.shell_path.display().to_string()),
         "model_id" => Ok(config.model_id.clone()),
         _ => Err(Error::Usage(format!("unknown config key `{key}`"))),
@@ -1323,6 +1327,9 @@ fn set_config_value(config: &mut Config, key: &str, value: Option<&str>) -> Resu
         "startup_timeout_seconds" => {
             config.startup_timeout_seconds =
                 parse_or_default(value, defaults.startup_timeout_seconds, key)?;
+        }
+        "show_tab_hint" => {
+            config.show_tab_hint = parse_or_default(value, defaults.show_tab_hint, key)?;
         }
         "shell_path" => {
             config.shell_path = value.map_or(defaults.shell_path, PathBuf::from);
@@ -1353,6 +1360,7 @@ fn print_config(config: &Config) {
         "context_size",
         "max_tokens",
         "startup_timeout_seconds",
+        "show_tab_hint",
         "shell_path",
         "model_id",
     ] {
@@ -1374,16 +1382,25 @@ mod tests {
         assert_eq!(config.threads, 3);
         assert_eq!(config_value(&config, "threads").unwrap(), "3");
         assert!(set_config_value(&mut config, "threads", Some("0")).is_err());
+        config.threads = 3;
+
+        set_config_value(&mut config, "show_tab_hint", Some("false")).unwrap();
+        assert!(!config.show_tab_hint);
+        assert_eq!(config_value(&config, "show_tab_hint").unwrap(), "false");
+        assert!(set_config_value(&mut config, "show_tab_hint", Some("sometimes")).is_err());
     }
 
     #[test]
     fn unset_restores_default() {
         let mut config = Config {
             model_id: "custom".into(),
+            show_tab_hint: false,
             ..Config::default()
         };
         set_config_value(&mut config, "model_id", None).unwrap();
+        set_config_value(&mut config, "show_tab_hint", None).unwrap();
         assert_eq!(config.model_id, Config::default().model_id);
+        assert!(config.show_tab_hint);
     }
 
     #[test]

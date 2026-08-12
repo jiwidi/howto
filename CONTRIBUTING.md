@@ -48,6 +48,7 @@ zsh -n completions/_howto shell/howto.zsh
 fish --no-config --no-execute completions/howto.fish shell/howto.fish
 expect -f scripts/test-shell-integration.exp
 expect -f scripts/test-setup-symlink.exp
+python3 scripts/test-tab-hint.py
 actionlint -no-color
 ruby -c Formula/howto.rb
 PYTHONPYCACHEPREFIX=/tmp/howto-pycache python3 -m py_compile \

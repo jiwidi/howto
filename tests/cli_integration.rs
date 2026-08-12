@@ -140,14 +140,19 @@ fn read_request(stream: &mut UnixStream) -> serde_json::Value {
 }
 
 fn run_with_response(arguments: &[&str], responses: &[&str]) -> Output {
+    run_with_configured_response(arguments, responses, Config::default())
+}
+
+fn run_with_configured_response(
+    arguments: &[&str],
+    responses: &[&str],
+    mut configuration: Config,
+) -> Output {
     let directory = tempfile::tempdir().unwrap();
     let paths = Paths::under(directory.path().to_path_buf());
     paths.create().unwrap();
     let (server_url, handle) = fake_server(&directory.path().join("provider.sock"), responses);
-    let configuration = Config {
-        server_url: Some(server_url),
-        ..Config::default()
-    };
+    configuration.server_url = Some(server_url);
     config::save(&paths.config_file(), &configuration).unwrap();
     setup::save(&paths, &setup::Receipt::new(None)).unwrap();
 
@@ -206,6 +211,59 @@ fn query_requires_setup_before_contacting_a_provider() {
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("run `howto setup` first"));
+}
+
+#[test]
+fn config_persists_and_resets_the_tab_hint_preference() {
+    let directory = tempfile::tempdir().unwrap();
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_howto"));
+        command.env("HOWTO_HOME", directory.path());
+        command
+    };
+
+    let default = command()
+        .args(["config", "get", "show_tab_hint"])
+        .output()
+        .unwrap();
+    assert!(default.status.success());
+    assert_eq!(default.stdout, b"true\n");
+
+    let disabled = command()
+        .args(["config", "set", "show_tab_hint", "false"])
+        .output()
+        .unwrap();
+    assert!(disabled.status.success());
+
+    let stored = command()
+        .args(["config", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(stored.status.success());
+    let stored: serde_json::Value = serde_json::from_slice(&stored.stdout).unwrap();
+    assert_eq!(stored["show_tab_hint"], false);
+
+    let invalid = command()
+        .args(["config", "set", "show_tab_hint", "sometimes"])
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+    let still_disabled = command()
+        .args(["config", "get", "show_tab_hint"])
+        .output()
+        .unwrap();
+    assert_eq!(still_disabled.stdout, b"false\n");
+
+    let reset = command()
+        .args(["config", "unset", "show_tab_hint"])
+        .output()
+        .unwrap();
+    assert!(reset.status.success());
+    let restored = command()
+        .args(["config", "get", "show_tab_hint"])
+        .output()
+        .unwrap();
+    assert_eq!(restored.stdout, b"true\n");
 }
 
 #[test]

@@ -338,7 +338,9 @@ schemas, and unknown keys, fills other missing keys from current defaults,
 validates ranges, refuses a symlinked file, and replaces it atomically after
 syncing both file and parent directory.
 `max_tokens` must be strictly smaller than `context_size`. Stored model,
-runtime, and shell paths must be absolute.
+runtime, and shell paths must be absolute. The `show_tab_hint` boolean is a
+presentation preference: disabling it suppresses only the post-query reminder,
+not pending-command publication or Tab insertion.
 
 macOS follows native Application Support, Caches, and Logs locations. Linux
 follows XDG config, data, cache, state, and runtime locations. Without

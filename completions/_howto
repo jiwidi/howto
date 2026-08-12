@@ -1,7 +1,7 @@
 #compdef howto
 
 _howto() {
-  local -a commands model_commands server_commands shell_commands config_commands
+  local -a commands model_commands server_commands shell_commands config_commands config_keys
   commands=(
     'setup:download the model and configure HowTo'
     'doctor:check the model and runtime'
@@ -32,6 +32,18 @@ _howto() {
     'get:print one setting'
     'set:change one setting'
     'unset:restore one setting to its default'
+  )
+  config_keys=(
+    'model_path:local GGUF model path'
+    'llama_server_path:llama-server executable path'
+    'server_url:completion provider URL'
+    'threads:inference worker threads'
+    'context_size:model context size'
+    'max_tokens:maximum generated tokens'
+    'startup_timeout_seconds:managed-server startup deadline'
+    'show_tab_hint:show the post-query Tab reminder'
+    'shell_path:execution shell path'
+    'model_id:completion model name'
   )
 
   if (( CURRENT > 2 )); then
@@ -105,6 +117,10 @@ _howto() {
             '--help[show help]'
         elif [[ $words[3] == list ]]; then
           _values 'option' '--json[emit JSON]'
+        elif (( CURRENT == 4 )) && [[ $words[3] == get || $words[3] == set || $words[3] == unset ]]; then
+          _describe 'configuration key' config_keys
+        elif (( CURRENT == 5 )) && [[ $words[3] == set && $words[4] == show_tab_hint ]]; then
+          _values 'boolean' true false
         fi
         return
         ;;

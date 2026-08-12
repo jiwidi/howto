@@ -53,6 +53,12 @@ _howto() {
     _howto_complete_words "list path get set unset --json --help" "$current"
   elif [[ $first == config && $second == list ]]; then
     _howto_complete_words "--json" "$current"
+  elif [[ $first == config && ( $second == get || $second == set || $second == unset ) && $COMP_CWORD -eq 3 ]]; then
+    _howto_complete_words \
+      "model_path llama_server_path server_url threads context_size max_tokens startup_timeout_seconds show_tab_hint shell_path model_id" \
+      "$current"
+  elif [[ $first == config && $second == set && ${COMP_WORDS[3]} == show_tab_hint && $COMP_CWORD -eq 4 ]]; then
+    _howto_complete_words "true false" "$current"
   fi
 }
 

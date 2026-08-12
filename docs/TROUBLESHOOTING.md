@@ -173,6 +173,19 @@ error.
 `howto shell disable` removes the selected or receipt-tracked integration;
 `howto setup --no-shell` sweeps every HowTo-managed shell integration.
 
+## Hide the post-query Tab reminder
+
+Keep Tab insertion active but hide only the reminder printed after an eligible
+single-command result with:
+
+```sh
+howto config set show_tab_hint false
+```
+
+The pending command is still available at the next empty prompt. Restore the
+default reminder with `howto config unset show_tab_hint` or explicitly set the
+value to `true`.
+
 ## The local server does not start
 
 First stop any recorded managed process and retry:

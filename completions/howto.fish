@@ -52,6 +52,20 @@ function __howto_management_option_led
     test "$words[2]" = "$argv[1]"; and string match -q -- '-*' $words[3]
 end
 
+function __howto_config_key_context
+    set -l words (commandline -opc)
+    test (count $words) -eq 3; or return 1
+    test "$words[2]" = config; and contains -- $words[3] get set unset
+end
+
+function __howto_show_tab_hint_value_context
+    set -l words (commandline -opc)
+    test (count $words) -eq 4; or return 1
+    test "$words[2]" = config
+    and test "$words[3]" = set
+    and test "$words[4]" = show_tab_hint
+end
+
 function __howto_query_option_context
     for target in setup doctor model server shell config help version
         __howto_management_is $target; and return 1
@@ -112,4 +126,6 @@ for command in howto
     complete -c $command -n '__howto_management_action_is shell status' -a '--json'
     complete -c $command -n '__howto_management_root_is config' -a 'list path get set unset --json'
     complete -c $command -n '__howto_management_action_is config list' -a '--json'
+    complete -c $command -n '__howto_config_key_context' -a 'model_path llama_server_path server_url threads context_size max_tokens startup_timeout_seconds show_tab_hint shell_path model_id'
+    complete -c $command -n '__howto_show_tab_hint_value_context' -a 'true false'
 end

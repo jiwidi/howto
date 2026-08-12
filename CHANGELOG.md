@@ -8,6 +8,11 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until
 
 ## [Unreleased]
 
+### Added
+
+- Add the `show_tab_hint` configuration setting, defaulting to `true`, so users
+  can hide only the post-query Tab reminder without disabling Tab insertion.
+
 ## [0.2.0] - 2026-08-12
 
 ### Added
