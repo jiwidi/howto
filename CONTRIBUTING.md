@@ -23,7 +23,7 @@ project's [Apache License 2.0](LICENSE).
 The repository uses Rust 1.86, pinned in CI. On macOS:
 
 ```sh
-brew install rust llama.cpp shellcheck actionlint cargo-audit fish
+brew install rust llama.cpp shellcheck actionlint cargo-audit expect fish
 git clone https://github.com/jiwidi/howto.git
 cd howto
 cargo build --locked
@@ -43,9 +43,10 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 cargo audit --file Cargo.lock
 bash -n scripts/render-homebrew-formula.sh
-shellcheck scripts/render-homebrew-formula.sh completions/howto.bash
-zsh -n completions/_howto
-fish --no-config --no-execute completions/howto.fish
+shellcheck scripts/render-homebrew-formula.sh completions/howto.bash shell/howto.bash
+zsh -n completions/_howto shell/howto.zsh
+fish --no-config --no-execute completions/howto.fish shell/howto.fish
+expect -f scripts/test-shell-integration.exp
 actionlint -no-color
 ruby -c Formula/howto.rb
 PYTHONPYCACHEPREFIX=/tmp/howto-pycache python3 -m py_compile \
@@ -80,7 +81,7 @@ cargo run -- doctor
 cargo run -- "show my current directory"
 ```
 
-The last command follows the normal first-use model-download flow. To isolate
+Run `cargo run -- setup` before the first query. To isolate
 development state from your normal installation, set `HOWTO_HOME` to a short,
 absolute, private temporary directory before running the binary. Relative
 values are rejected. Keep it short because the managed runtime uses a Unix
@@ -114,6 +115,8 @@ Do not use confidential prompts with a development or third-party endpoint.
   files that affect execution or server ownership.
 - Avoid logging prompts, generated commands, provider keys, or local bearer
   tokens.
+- Preserve normal Tab completion outside an empty prompt with a fresh pending
+  HowTo result, and never make a shell adapter submit the edited line.
 - Return typed errors and preserve the documented exit-code classes.
 
 ## Tests
@@ -125,6 +128,9 @@ Every behavior change needs a test at the narrowest useful level:
 - configuration, path, model, and runtime invariants belong in their module;
 - end-to-end CLI/provider and stdout/stderr contracts belong in
   `tests/cli_integration.rs`; and
+- setup receipts, startup-file transactions, pending-command isolation, and
+  adapter behavior belong in `src/setup.rs`, `src/shell.rs`, and shell PTY
+  checks; and
 - shell policy belongs in `tests/safety.rs`.
 
 For a new safety rule, include both malicious cases and close benign controls.

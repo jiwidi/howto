@@ -1,11 +1,13 @@
 #compdef howto
 
 _howto() {
-  local -a commands model_commands server_commands config_commands
+  local -a commands model_commands server_commands shell_commands config_commands
   commands=(
+    'setup:download the model and configure HowTo'
     'doctor:check the model and runtime'
     'model:install or inspect the model'
     'server:inspect or stop the local server'
+    'shell:manage the context-aware Tab integration'
     'config:read or change configuration'
     'help:show help'
     'version:show version'
@@ -18,6 +20,12 @@ _howto() {
     'status:inspect the resident model server'
     'stop:stop the resident model server'
   )
+  shell_commands=(
+    'init:print a shell adapter'
+    'enable:enable context-aware Tab insertion'
+    'disable:disable context-aware Tab insertion'
+    'status:inspect the Tab integration'
+  )
   config_commands=(
     'list:list configuration'
     'path:print the configuration path'
@@ -28,6 +36,14 @@ _howto() {
 
   if (( CURRENT > 2 )); then
     case $words[2] in
+      setup)
+        _arguments \
+          '(-y --yes)'{-y,--yes}'[accept setup prompts]' \
+          '--no-shell[disable and omit Tab integration]' \
+          '--shell[configure a specific shell]:shell:(zsh bash fish)' \
+          '--help[show help]'
+        return
+        ;;
       doctor)
         _values 'option' '--json[emit JSON]' '--deep[verify the model digest]'
         return
@@ -56,6 +72,24 @@ _howto() {
             '--help[show help]'
         else
           _values 'option' '--json[emit JSON]'
+        fi
+        return
+        ;;
+      shell)
+        if (( CURRENT == 3 )); then
+          _describe 'shell command' shell_commands
+        else
+          case $words[3] in
+            init)
+              _values 'shell' zsh bash fish
+              ;;
+            enable|disable)
+              _arguments '--shell[shell to configure]:shell:(zsh bash fish)'
+              ;;
+            status)
+              _values 'option' '--json[emit JSON]'
+              ;;
+          esac
         fi
         return
         ;;

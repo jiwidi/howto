@@ -6,11 +6,20 @@ use crate::error::{Error, Result};
 pub enum Invocation {
     Help,
     Version,
+    Setup(SetupOptions),
     Query(QueryOptions),
     Doctor { json: bool, deep: bool },
     Model(ModelCommand),
     Server(ServerCommand),
     Config(ConfigCommand),
+    Shell(ShellCommand),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetupOptions {
+    pub yes: bool,
+    pub no_shell: bool,
+    pub shell: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,6 +54,15 @@ pub enum ConfigCommand {
     Unset { key: String },
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ShellCommand {
+    Init { shell: String },
+    Enable { shell: Option<String> },
+    Disable { shell: Option<String> },
+    Status { json: bool },
+    Take,
+}
+
 pub fn run_from_env() -> Result<i32> {
     let invocation = parse(std::env::args_os().skip(1))?;
     crate::app::run(invocation)
@@ -68,6 +86,14 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation
         "-V" | "--version" => exact_or_usage(&arguments, Invocation::Version),
         "help" if arguments.len() == 1 => Ok(Invocation::Help),
         "version" if arguments.len() == 1 => Ok(Invocation::Version),
+        "setup"
+            if arguments.len() == 1
+                || arguments
+                    .get(1)
+                    .is_some_and(|argument| argument.starts_with('-')) =>
+        {
+            parse_setup(&arguments[1..])
+        }
         "doctor"
             if arguments.len() == 1
                 || arguments
@@ -101,8 +127,59 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation
         {
             parse_config(&arguments[1..])
         }
+        "shell"
+            if arguments.get(1).is_some_and(|argument| {
+                matches!(
+                    argument.as_str(),
+                    "init" | "enable" | "disable" | "status" | "take"
+                ) || argument.starts_with('-')
+            }) =>
+        {
+            parse_shell(&arguments[1..])
+        }
         _ => parse_query(&arguments),
     }
+}
+
+fn parse_setup(arguments: &[String]) -> Result<Invocation> {
+    if arguments
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
+    {
+        return Ok(Invocation::Help);
+    }
+    let mut yes = false;
+    let mut no_shell = false;
+    let mut shell = None;
+    let mut index = 0;
+    while index < arguments.len() {
+        match arguments[index].as_str() {
+            "-y" | "--yes" => yes = true,
+            "--no-shell" => no_shell = true,
+            "--shell" => {
+                index += 1;
+                let value = arguments
+                    .get(index)
+                    .ok_or_else(|| Error::Usage("--shell needs zsh, bash, or fish".into()))?;
+                if !matches!(value.as_str(), "zsh" | "bash" | "fish") {
+                    return Err(Error::Usage("--shell needs zsh, bash, or fish".into()));
+                }
+                shell = Some(value.clone());
+            }
+            argument => return Err(Error::Usage(format!("unknown setup option `{argument}`"))),
+        }
+        index += 1;
+    }
+    if no_shell && shell.is_some() {
+        return Err(Error::Usage(
+            "--no-shell and --shell cannot be used together".into(),
+        ));
+    }
+    Ok(Invocation::Setup(SetupOptions {
+        yes,
+        no_shell,
+        shell,
+    }))
 }
 
 fn exact_or_usage(arguments: &[String], invocation: Invocation) -> Result<Invocation> {
@@ -312,13 +389,72 @@ fn parse_config(arguments: &[String]) -> Result<Invocation> {
     }
 }
 
+fn parse_shell(arguments: &[String]) -> Result<Invocation> {
+    if arguments
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "-h" | "--help"))
+    {
+        return Ok(Invocation::Help);
+    }
+    let Some(action) = arguments.first().map(String::as_str) else {
+        return Err(Error::Usage(
+            "usage: howto shell <init|enable|disable|status>".into(),
+        ));
+    };
+    let rest = &arguments[1..];
+    match action {
+        "init" => match rest {
+            [shell] if matches!(shell.as_str(), "zsh" | "bash" | "fish") => {
+                Ok(Invocation::Shell(ShellCommand::Init {
+                    shell: shell.clone(),
+                }))
+            }
+            _ => Err(Error::Usage(
+                "usage: howto shell init <zsh|bash|fish>".into(),
+            )),
+        },
+        "enable" | "disable" => {
+            let shell = match rest {
+                [] => None,
+                [flag, shell]
+                    if flag == "--shell" && matches!(shell.as_str(), "zsh" | "bash" | "fish") =>
+                {
+                    Some(shell.clone())
+                }
+                _ => {
+                    return Err(Error::Usage(format!(
+                        "usage: howto shell {action} [--shell <zsh|bash|fish>]"
+                    )))
+                }
+            };
+            if action == "enable" {
+                Ok(Invocation::Shell(ShellCommand::Enable { shell }))
+            } else {
+                Ok(Invocation::Shell(ShellCommand::Disable { shell }))
+            }
+        }
+        "status" => match rest {
+            [] => Ok(Invocation::Shell(ShellCommand::Status { json: false })),
+            [flag] if flag == "--json" => {
+                Ok(Invocation::Shell(ShellCommand::Status { json: true }))
+            }
+            _ => Err(Error::Usage("usage: howto shell status [--json]".into())),
+        },
+        "take" if rest.is_empty() => Ok(Invocation::Shell(ShellCommand::Take)),
+        _ => Err(Error::Usage(format!(
+            "unknown shell command `{action}` (expected init, enable, disable, or status)"
+        ))),
+    }
+}
+
 pub fn print_help() {
     println!(
         "HowTo {version}\n\
          Turn plain English into a shell command, locally.\n\n\
          USAGE:\n  howto [OPTIONS] <REQUEST...>\n  howto <COMMAND>\n\n\
          EXAMPLES:\n  howto \"free port 8080\"\n  howto find files larger than 1GB\n  howto -x show my current IP address\n\n\
-         COMMANDS:\n  doctor              Check the model and runtime\n  model status        Inspect the local model\n  model install       Download and verify the local model\n  server status       Inspect the resident model server\n  server stop         Stop the resident model server\n  config              Read or change configuration\n  help                 Show this help\n\n\
+         COMMANDS:\n  setup [OPTIONS]              Download the model and configure HowTo\n  doctor                       Check setup, the model, and runtime\n  model status                 Inspect the local model\n  model install                Download and verify the local model\n  server status                Inspect the resident model server\n  server stop                  Stop the resident model server\n  shell status                 Inspect the Tab integration\n  shell enable [--shell SHELL] Enable the Tab integration\n  shell disable [--shell SHELL]\n                                Disable the Tab integration\n  shell init <zsh|bash|fish>   Print an embedded shell adapter\n  config                       Read or change configuration\n  help                         Show this help\n\n\
+         SETUP OPTIONS:\n  -y, --yes          Accept setup prompts\n      --no-shell     Complete setup and remove managed shell integration\n      --shell SHELL  Enable integration for zsh, bash, or fish\n\n\
          OPTIONS:\n  -x, -e, --execute   Execute after an explicit confirmation\n  -c, --copy          Copy the generated command\n  -q, --quiet         Print only a no-known-risk command\n  -n, --count N       Generate up to N alternatives (1-8)\n      --json          Emit machine-readable output\n      --timing        Show generation timing\n  -h, --help          Show this help\n  -V, --version       Show the version\n\n\
          Nothing executes by default. DANGER and UNKNOWN commands cannot execute.",
         version = crate::VERSION
@@ -329,7 +465,10 @@ pub fn print_help() {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{parse, ConfigCommand, Invocation, ModelCommand, QueryOptions, ServerCommand};
+    use super::{
+        parse, ConfigCommand, Invocation, ModelCommand, QueryOptions, ServerCommand, SetupOptions,
+        ShellCommand,
+    };
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
@@ -380,6 +519,51 @@ mod tests {
     }
 
     #[test]
+    fn parses_setup_and_preserves_natural_setup_requests() {
+        assert_eq!(
+            parse(args(&["setup"])).unwrap(),
+            Invocation::Setup(SetupOptions {
+                yes: false,
+                no_shell: false,
+                shell: None,
+            })
+        );
+        assert_eq!(
+            parse(args(&["setup", "--yes", "--shell", "fish"])).unwrap(),
+            Invocation::Setup(SetupOptions {
+                yes: true,
+                no_shell: false,
+                shell: Some("fish".into()),
+            })
+        );
+        let Invocation::Query(query) = parse(args(&["setup", "a", "venv"])).unwrap() else {
+            panic!("expected a natural-language query");
+        };
+        assert_eq!(query.words, ["setup", "a", "venv"]);
+    }
+
+    #[test]
+    fn parses_shell_management() {
+        assert_eq!(
+            parse(args(&["shell", "init", "zsh"])).unwrap(),
+            Invocation::Shell(ShellCommand::Init {
+                shell: "zsh".into()
+            })
+        );
+        assert_eq!(
+            parse(args(&["shell", "enable", "--shell", "bash"])).unwrap(),
+            Invocation::Shell(ShellCommand::Enable {
+                shell: Some("bash".into())
+            })
+        );
+        let Invocation::Query(query) = parse(args(&["shell", "into", "a", "container"])).unwrap()
+        else {
+            panic!("expected a natural-language query");
+        };
+        assert_eq!(query.words[0], "shell");
+    }
+
+    #[test]
     fn rejects_output_and_execution_mode_conflicts() {
         assert!(parse(args(&["--json", "--execute", "list", "files"])).is_err());
         assert!(parse(args(&["--quiet", "--execute", "list", "files"])).is_err());
@@ -394,6 +578,8 @@ mod tests {
             &["model", "the", "current", "directory"],
             &["server", "a", "local", "website"],
             &["config", "my", "git", "identity"],
+            &["setup", "a", "python", "venv"],
+            &["shell", "into", "a", "container"],
             &["version", "these", "files"],
         ] {
             let Invocation::Query(query) = parse(args(words)).unwrap() else {

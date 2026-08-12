@@ -10,12 +10,18 @@ function __howto_management_is
         case doctor
             test (count $words) -eq 2; and return 0
             string match -q -- '-*' $words[3]
+        case setup
+            test (count $words) -eq 2; and return 0
+            string match -q -- '-*' $words[3]
         case model
             test (count $words) -eq 2; and return 0
             contains -- $words[3] status install; or string match -q -- '-*' $words[3]
         case server
             test (count $words) -eq 2; and return 0
             contains -- $words[3] status stop; or string match -q -- '-*' $words[3]
+        case shell
+            test (count $words) -ge 3; or return 1
+            contains -- $words[3] init enable disable status; or string match -q -- '-*' $words[3]
         case config
             test (count $words) -eq 2; and return 0
             contains -- $words[3] list path get set unset; or string match -q -- '-*' $words[3]
@@ -47,7 +53,7 @@ function __howto_management_option_led
 end
 
 function __howto_query_option_context
-    for target in doctor model server config help version
+    for target in setup doctor model server shell config help version
         __howto_management_is $target; and return 1
     end
 
@@ -72,7 +78,7 @@ end
 
 function __howto_help_context
     __howto_query_option_context; and return 0
-    for target in doctor model server config
+    for target in setup doctor model server shell config
         __howto_management_is $target; and return 0
     end
     return 1
@@ -80,7 +86,7 @@ end
 
 for command in howto
     complete -c $command -f
-    complete -c $command -n '__howto_first_argument' -a 'doctor model server config help version'
+    complete -c $command -n '__howto_first_argument' -a 'setup doctor model server shell config help version'
     complete -c $command -n '__howto_help_context' -s h -l help -d 'Show help'
     complete -c $command -n '__howto_query_option_context' -s V -l version -d 'Show version'
     complete -c $command -n '__howto_query_option_context' -s x -l execute -d 'Execute after confirmation'
@@ -91,12 +97,19 @@ for command in howto
     complete -c $command -n '__howto_query_option_context' -l json -d 'Emit JSON'
     complete -c $command -n '__howto_query_option_context' -l timing -d 'Show generation timing'
     complete -c $command -n '__howto_management_is doctor' -a '--json --deep'
+    complete -c $command -n '__howto_management_is setup' -s y -l yes -d 'Accept setup prompts'
+    complete -c $command -n '__howto_management_is setup' -l no-shell -d 'Disable Tab integration'
+    complete -c $command -n '__howto_management_is setup' -l shell -x -a 'zsh bash fish' -d 'Configure a shell'
     complete -c $command -n '__howto_management_root_is model' -a 'status install --json --deep'
     complete -c $command -n '__howto_management_action_is model status; or __howto_management_option_led model' -a '--json --deep'
     complete -c $command -n '__howto_management_action_is model install' -a '-y --yes'
     complete -c $command -n '__howto_management_root_is server' -a 'status stop --json'
     complete -c $command -n '__howto_management_action_is server status; or __howto_management_option_led server' -a '--json'
     complete -c $command -n '__howto_management_action_is server stop' -a '--json'
+    complete -c $command -n '__howto_management_root_is shell' -a 'init enable disable status'
+    complete -c $command -n '__howto_management_action_is shell init' -a 'zsh bash fish'
+    complete -c $command -n '__howto_management_action_is shell enable; or __howto_management_action_is shell disable' -l shell -x -a 'zsh bash fish'
+    complete -c $command -n '__howto_management_action_is shell status' -a '--json'
     complete -c $command -n '__howto_management_root_is config' -a 'list path get set unset --json'
     complete -c $command -n '__howto_management_action_is config list' -a '--json'
 end

@@ -6,6 +6,7 @@ Start with the built-in diagnostics:
 howto doctor --deep
 howto model status --deep
 howto server status
+howto shell status
 howto config list
 ```
 
@@ -27,17 +28,10 @@ model deep verification fails, or `doctor` finds setup incomplete.
 
 ## Homebrew cannot find HowTo
 
-After a stable formula has been published, activate the tap and install it:
+Install the stable tap formula directly:
 
 ```sh
-brew tap jiwidi/tap
-brew install howto
-```
-
-Before the first stable formula is published, use the HEAD formula:
-
-```sh
-brew install --HEAD jiwidi/tap/howto
+brew install jiwidi/tap/howto
 ```
 
 Confirm that both names resolve:
@@ -45,24 +39,38 @@ Confirm that both names resolve:
 ```sh
 brew list howto
 howto --version
-howto --version
 ```
 
-If a previous HEAD build is stale, update the tap and reinstall:
+If the installed formula is stale, update the tap and reinstall:
 
 ```sh
 brew update
-brew reinstall --HEAD jiwidi/tap/howto
+brew reinstall jiwidi/tap/howto
 ```
+
+## Setup has not been completed
+
+Run the one-time onboarding workflow before a normal query:
+
+```sh
+howto setup
+```
+
+An interactive query offers to run it. Piped input, JSON, quiet mode, and other
+non-interactive requests never prompt or start a large download; they exit with
+an instruction to run setup. `howto setup --yes` accepts setup prompts for
+automation, while `--no-shell` disables and removes any HowTo-managed Tab
+integration. Setup uses an existing verified model or configured provider and
+is safe to rerun after an interruption. If `setup.json` was truncated, explicit
+setup quarantines it as `setup.json.corrupt-*` and repairs onboarding; unsafe
+files and state from a newer incompatible HowTo version remain hard errors.
 
 ## The model is not installed
 
-An interactive first query asks before downloading about 940 MiB. A script,
-pipe, or other non-interactive session cannot answer that prompt, so prepare
-the model explicitly:
+`howto setup` asks before downloading about 940 MiB. For unattended setup, use:
 
 ```sh
-howto model install --yes
+howto setup --yes
 howto model status --deep
 ```
 
@@ -123,8 +131,35 @@ howto doctor
 Resolution order is `HOWTO_LLAMA_SERVER`, `llama_server_path`, `PATH`, then
 well-known Homebrew and system paths. The selected file must exist and be
 executable, and its resolved filename must be `llama-server`. `howto doctor` also
-runs `llama-server --version` with a ten-second deadline; a failed probe keeps
+runs `llama-server --version` with a 30-second deadline; a failed probe keeps
 local readiness false. Run a harmless query to test model loading and inference.
+
+## Tab does not insert the generated command
+
+Check both persistent configuration and the current shell:
+
+```sh
+howto shell status
+```
+
+If configuration is present but the current shell is not active, open a new
+terminal. Tab inserts only at a completely empty prompt, only for a fresh
+single-command `NO_KNOWN_RISK` or `CAUTION` result, and consumes that result
+once. It otherwise retains normal completion behavior. Pending commands expire
+after ten minutes and are isolated per shell session.
+
+Repair or select the integration explicitly with:
+
+```sh
+howto shell enable --shell zsh   # or bash/fish
+```
+
+Bash needs version 4.1 or newer for its empty-line completion API. The system
+Bash 3.2 shipped by macOS is intentionally left unchanged; use the default zsh
+or a newer Bash. If setup refused a symlinked or malformed startup file, resolve
+that configuration manually and rerun setup rather than replacing the file.
+`howto shell disable` removes the selected or receipt-tracked integration;
+`howto setup --no-shell` sweeps every HowTo-managed shell integration.
 
 ## The local server does not start
 

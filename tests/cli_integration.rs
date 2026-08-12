@@ -7,6 +7,30 @@ use std::time::Duration;
 
 use howto::config::{self, Config};
 use howto::paths::Paths;
+use howto::{setup, shell};
+use sha2::{Digest, Sha256};
+
+fn stage_pending(paths: &Paths, session: &str, command: &str) {
+    let session_hash = hex::encode(Sha256::digest(session.as_bytes()));
+    let path = paths
+        .runtime_dir
+        .join(format!("pending-{session_hash}.json"));
+    let created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    std::fs::write(
+        path,
+        serde_json::to_vec(&serde_json::json!({
+            "schema": 1,
+            "created_at": created_at,
+            "session": session,
+            "command": command,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
 
 fn fake_server(socket: &Path, commands: &[&str]) -> (String, thread::JoinHandle<()>) {
     let listener = UnixListener::bind(socket).unwrap();
@@ -125,6 +149,7 @@ fn run_with_response(arguments: &[&str], responses: &[&str]) -> Output {
         ..Config::default()
     };
     config::save(&paths.config_file(), &configuration).unwrap();
+    setup::save(&paths, &setup::Receipt::new(None)).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_howto"))
         .args(arguments)
@@ -151,6 +176,231 @@ fn generates_through_replaceable_provider_boundary() {
         "lsof -ti :8080 | xargs kill\n"
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("CAUTION"));
+}
+
+#[test]
+fn query_requires_setup_before_contacting_a_provider() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = Paths::under(directory.path().to_path_buf());
+    paths.create().unwrap();
+    config::save(
+        &paths.config_file(),
+        &Config {
+            server_url: Some(format!(
+                "unix://{}",
+                directory
+                    .path()
+                    .join("provider-that-must-not-be-contacted.sock")
+                    .display()
+            )),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_howto"))
+        .args(["show", "current", "directory"])
+        .env("HOWTO_HOME", directory.path())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(3));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("run `howto setup` first"));
+}
+
+#[test]
+fn setup_with_a_configured_provider_skips_the_local_model() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = Paths::under(directory.path().to_path_buf());
+    paths.create().unwrap();
+    config::save(
+        &paths.config_file(),
+        &Config {
+            server_url: Some("https://provider.example".into()),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_howto"))
+        .args(["setup", "--yes", "--no-shell"])
+        .env("HOWTO_HOME", directory.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(setup::load(&paths).unwrap().is_some());
+    assert!(std::fs::read_dir(paths.models_dir())
+        .unwrap()
+        .next()
+        .is_none());
+}
+
+#[test]
+fn setup_manages_zsh_integration_idempotently() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let state = directory.path().join("state");
+    std::fs::create_dir_all(&home).unwrap();
+    let paths = Paths::under(state.clone());
+    paths.create().unwrap();
+    config::save(
+        &paths.config_file(),
+        &Config {
+            server_url: Some("https://provider.example".into()),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    for _ in 0..2 {
+        let output = Command::new(env!("CARGO_BIN_EXE_howto"))
+            .args(["setup", "--yes", "--shell", "zsh"])
+            .env("HOWTO_HOME", &state)
+            .env("HOME", &home)
+            .env("ZDOTDIR", &home)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let startup = std::fs::read_to_string(home.join(".zshrc")).unwrap();
+    assert_eq!(startup.matches(">>> HowTo shell integration").count(), 1);
+    assert!(paths.shell_dir().join("howto.zsh").is_file());
+
+    let moved_zdotdir = home.join("new-zdotdir");
+    std::fs::create_dir_all(&moved_zdotdir).unwrap();
+    let migrated = Command::new(env!("CARGO_BIN_EXE_howto"))
+        .args(["setup", "--yes", "--shell", "zsh"])
+        .env("HOWTO_HOME", &state)
+        .env("HOME", &home)
+        .env("ZDOTDIR", &moved_zdotdir)
+        .output()
+        .unwrap();
+    assert!(
+        migrated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&migrated.stderr)
+    );
+    assert!(!std::fs::read_to_string(home.join(".zshrc"))
+        .unwrap()
+        .contains("HowTo shell integration"));
+    let receipt = setup::load(&paths).unwrap().unwrap();
+    assert_eq!(receipt.shell.as_deref(), Some("zsh"));
+    assert_eq!(
+        receipt.shell_startup_files,
+        vec![moved_zdotdir.join(".zshrc")]
+    );
+
+    let status = Command::new(env!("CARGO_BIN_EXE_howto"))
+        .args(["shell", "status", "--json"])
+        .env("HOWTO_HOME", &state)
+        .env("HOME", &home)
+        .env("ZDOTDIR", &moved_zdotdir)
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
+    assert_eq!(status["configured"], true);
+    assert_eq!(status["active_in_this_shell"], false);
+
+    let third_zdotdir = home.join("third-zdotdir");
+    std::fs::create_dir_all(&third_zdotdir).unwrap();
+    let disabled = Command::new(env!("CARGO_BIN_EXE_howto"))
+        .args(["shell", "disable", "--shell", "zsh"])
+        .env("HOWTO_HOME", &state)
+        .env("HOME", &home)
+        .env("ZDOTDIR", &third_zdotdir)
+        .output()
+        .unwrap();
+    assert!(
+        disabled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&disabled.stderr)
+    );
+    assert!(!std::fs::read_to_string(moved_zdotdir.join(".zshrc"))
+        .unwrap()
+        .contains("HowTo shell integration"));
+    assert!(!paths.shell_dir().join("howto.zsh").exists());
+    assert_eq!(setup::load(&paths).unwrap().unwrap().shell, None);
+}
+
+#[test]
+fn automatic_setup_skips_an_unsupported_login_shell() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().join("home");
+    let state = directory.path().join("state");
+    std::fs::create_dir_all(&home).unwrap();
+    let paths = Paths::under(state.clone());
+    paths.create().unwrap();
+    config::save(
+        &paths.config_file(),
+        &Config {
+            server_url: Some("https://provider.example".into()),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_howto"))
+        .args(["setup", "--yes"])
+        .env("HOWTO_HOME", &state)
+        .env("HOME", &home)
+        .env("SHELL", "/usr/bin/nu")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("was skipped"));
+    assert_eq!(setup::load(&paths).unwrap().unwrap().shell, None);
+}
+
+#[test]
+fn shell_take_is_one_shot() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = Paths::under(directory.path().to_path_buf());
+    paths.create().unwrap();
+    setup::save(&paths, &setup::Receipt::new(Some("zsh"))).unwrap();
+    stage_pending(&paths, "zsh-integration-test", "printf '%s\\n' hello");
+
+    let first = Command::new(env!("CARGO_BIN_EXE_howto"))
+        .args(["shell", "take"])
+        .env("HOWTO_HOME", directory.path())
+        .env(shell::SESSION_ENV, "zsh-integration-test")
+        .output()
+        .unwrap();
+    assert!(first.status.success());
+    assert_eq!(first.stdout, b"printf '%s\\n' hello\n");
+
+    let second = Command::new(env!("CARGO_BIN_EXE_howto"))
+        .args(["shell", "take"])
+        .env("HOWTO_HOME", directory.path())
+        .env(shell::SESSION_ENV, "zsh-integration-test")
+        .output()
+        .unwrap();
+    assert_eq!(second.status.code(), Some(1));
+    assert!(second.stdout.is_empty());
+
+    stage_pending(&paths, "zsh-integration-test", "pwd");
+    setup::save(&paths, &setup::Receipt::new(None)).unwrap();
+    let disabled = Command::new(env!("CARGO_BIN_EXE_howto"))
+        .args(["shell", "take"])
+        .env("HOWTO_HOME", directory.path())
+        .env(shell::SESSION_ENV, "zsh-integration-test")
+        .output()
+        .unwrap();
+    assert_eq!(disabled.status.code(), Some(1));
+    assert!(disabled.stdout.is_empty());
 }
 
 #[test]
@@ -218,6 +468,7 @@ fn doctor_probes_a_configured_provider() {
         },
     )
     .unwrap();
+    setup::save(&paths, &setup::Receipt::new(None)).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_howto"))
         .args(["doctor", "--json"])
@@ -233,6 +484,7 @@ fn doctor_probes_a_configured_provider() {
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["ready"], true);
+    assert_eq!(value["setup_complete"], true);
     assert_eq!(value["provider_healthy"], true);
 }
 
@@ -252,6 +504,7 @@ fn doctor_rejects_an_unreachable_configured_provider() {
         },
     )
     .unwrap();
+    setup::save(&paths, &setup::Receipt::new(None)).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_howto"))
         .args(["doctor", "--json"])
@@ -279,6 +532,7 @@ fn doctor_falls_back_to_the_openai_models_route() {
         },
     )
     .unwrap();
+    setup::save(&paths, &setup::Receipt::new(None)).unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_howto"))
         .args(["doctor", "--json"])
@@ -294,6 +548,7 @@ fn doctor_falls_back_to_the_openai_models_route() {
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["provider_healthy"], true);
+    assert_eq!(value["setup_complete"], true);
 }
 
 #[test]
@@ -315,6 +570,7 @@ fn local_doctor_rejects_an_unrelated_executable_and_custom_manifest_is_null() {
         },
     )
     .unwrap();
+    setup::save(&paths, &setup::Receipt::new(None)).unwrap();
 
     let doctor = Command::new(env!("CARGO_BIN_EXE_howto"))
         .args(["doctor", "--json"])
