@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::Duration;
 
@@ -168,6 +168,72 @@ fn run_with_configured_response(
     output
 }
 
+fn run_failed_command_advisor(
+    home: &Path,
+    status: u16,
+    session: Option<&str>,
+    failed_command: &[u8],
+) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_howto"));
+    command
+        .args(["shell", "advise", "--status", &status.to_string()])
+        .env("HOWTO_HOME", home)
+        .env_remove("HOWTO_MODEL")
+        .env_remove("HOWTO_LLAMA_SERVER")
+        .env_remove("HOWTO_API_KEY")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(session) = session {
+        command.env(shell::SESSION_ENV, session);
+    } else {
+        command.env_remove(shell::SESSION_ENV);
+    }
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(failed_command)
+        .unwrap();
+    child.wait_with_output().unwrap()
+}
+
+fn run_failed_command_advisor_readiness(home: &Path, session: Option<&str>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_howto"));
+    command
+        .args(["shell", "advisor-ready"])
+        .env("HOWTO_HOME", home)
+        .env_remove("HOWTO_MODEL")
+        .env_remove("HOWTO_LLAMA_SERVER")
+        .env_remove("HOWTO_API_KEY")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(session) = session {
+        command.env(shell::SESSION_ENV, session);
+    } else {
+        command.env_remove(shell::SESSION_ENV);
+    }
+    let mut child = command.spawn().unwrap();
+
+    // Keep stdin open: readiness must terminate without waiting for or reading
+    // command input. Shell adapters use this before deciding whether to capture.
+    let mut status = None;
+    for _ in 0..100 {
+        status = child.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if status.is_none() {
+        child.kill().unwrap();
+        panic!("advisor readiness waited for stdin");
+    }
+    child.wait_with_output().unwrap()
+}
+
 #[test]
 fn generates_through_replaceable_provider_boundary() {
     let output = run_with_response(&["free", "port", "8080"], &["lsof -ti :8080 | xargs kill"]);
@@ -267,6 +333,76 @@ fn config_persists_and_resets_the_tab_hint_preference() {
 }
 
 #[test]
+fn config_persists_failed_command_advisor_and_enforces_local_only() {
+    let directory = tempfile::tempdir().unwrap();
+    let command = || {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_howto"));
+        command.env("HOWTO_HOME", directory.path());
+        command
+    };
+
+    let default = command()
+        .args(["config", "get", "failed_command_advisor"])
+        .output()
+        .unwrap();
+    assert!(default.status.success());
+    assert_eq!(default.stdout, b"false\n");
+
+    let enabled = command()
+        .args(["config", "set", "failed_command_advisor", "true"])
+        .output()
+        .unwrap();
+    assert!(enabled.status.success());
+
+    let remote = command()
+        .args(["config", "set", "server_url", "https://provider.example"])
+        .output()
+        .unwrap();
+    assert_eq!(remote.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&remote.stderr).contains("managed local model"));
+
+    let stored = command()
+        .args(["config", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(stored.status.success());
+    let stored: serde_json::Value = serde_json::from_slice(&stored.stdout).unwrap();
+    assert_eq!(stored["failed_command_advisor"], true);
+    assert_eq!(stored["server_url"], serde_json::Value::Null);
+
+    let reset = command()
+        .args(["config", "unset", "failed_command_advisor"])
+        .output()
+        .unwrap();
+    assert!(reset.status.success());
+    let restored = command()
+        .args(["config", "get", "failed_command_advisor"])
+        .output()
+        .unwrap();
+    assert_eq!(restored.stdout, b"false\n");
+
+    let remote = command()
+        .args(["config", "set", "server_url", "https://provider.example"])
+        .output()
+        .unwrap();
+    assert!(remote.status.success());
+    let rejected = command()
+        .args(["config", "set", "failed_command_advisor", "true"])
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("managed local model"));
+    let stored = command()
+        .args(["config", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(stored.status.success());
+    let stored: serde_json::Value = serde_json::from_slice(&stored.stdout).unwrap();
+    assert_eq!(stored["failed_command_advisor"], false);
+    assert_eq!(stored["server_url"], "https://provider.example");
+}
+
+#[test]
 fn setup_with_a_configured_provider_skips_the_local_model() {
     let directory = tempfile::tempdir().unwrap();
     let paths = Paths::under(directory.path().to_path_buf());
@@ -295,6 +431,36 @@ fn setup_with_a_configured_provider_skips_the_local_model() {
         .unwrap()
         .next()
         .is_none());
+}
+
+#[test]
+fn noninteractive_setup_does_not_opt_in_to_failed_command_advice() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = Paths::under(directory.path().to_path_buf());
+    paths.create().unwrap();
+    config::save(
+        &paths.config_file(),
+        &Config {
+            server_url: Some("https://provider.example".into()),
+            ..Config::default()
+        },
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_howto"))
+        .args(["setup", "--yes", "--no-shell"])
+        .env("HOWTO_HOME", directory.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let saved = config::load(&paths.config_file()).unwrap();
+    assert!(!saved.failed_command_advisor);
+    assert!(
+        !setup::load(&paths)
+            .unwrap()
+            .unwrap()
+            .failed_command_advisor_prompted
+    );
 }
 
 #[test]
@@ -368,6 +534,12 @@ fn setup_manages_zsh_integration_idempotently() {
     let status: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(status["configured"], true);
     assert_eq!(status["active_in_this_shell"], false);
+    assert_eq!(status["failed_command_advisor"]["enabled"], false);
+    assert_eq!(status["failed_command_advisor"]["supported"], true);
+    assert_eq!(
+        status["failed_command_advisor"]["active_in_this_shell"],
+        false
+    );
 
     let third_zdotdir = home.join("third-zdotdir");
     std::fs::create_dir_all(&third_zdotdir).unwrap();
@@ -552,6 +724,113 @@ fn shell_take_is_one_shot() {
         .unwrap();
     assert_eq!(disabled.status.code(), Some(1));
     assert!(disabled.stdout.is_empty());
+}
+
+#[test]
+fn failed_command_advisor_silently_requires_terminal_outputs() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = Paths::under(directory.path().to_path_buf());
+    paths.create().unwrap();
+
+    let disabled = run_failed_command_advisor(
+        directory.path(),
+        127,
+        Some("zsh-integration-test"),
+        b"missing-command",
+    );
+    assert_eq!(disabled.status.code(), Some(78));
+    assert!(disabled.stdout.is_empty());
+    assert!(disabled.stderr.is_empty());
+
+    config::save(
+        &paths.config_file(),
+        &Config {
+            failed_command_advisor: true,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    let without_setup = run_failed_command_advisor(
+        directory.path(),
+        127,
+        Some("zsh-integration-test"),
+        b"missing-command",
+    );
+    assert_eq!(without_setup.status.code(), Some(78));
+    assert!(without_setup.stdout.is_empty());
+    assert!(without_setup.stderr.is_empty());
+
+    setup::save(&paths, &setup::Receipt::new(Some("zsh"))).unwrap();
+    let without_session =
+        run_failed_command_advisor(directory.path(), 127, None, b"missing-command");
+    assert_eq!(without_session.status.code(), Some(78));
+    assert!(without_session.stdout.is_empty());
+    assert!(without_session.stderr.is_empty());
+
+    let wrong_session = run_failed_command_advisor(
+        directory.path(),
+        127,
+        Some("bash-integration-test"),
+        b"missing-command",
+    );
+    assert_eq!(wrong_session.status.code(), Some(78));
+    assert!(wrong_session.stdout.is_empty());
+    assert!(wrong_session.stderr.is_empty());
+
+    let redirected_outputs = run_failed_command_advisor(
+        directory.path(),
+        127,
+        Some("zsh-integration-test"),
+        b"missing-command",
+    );
+    assert_eq!(redirected_outputs.status.code(), Some(78));
+    assert!(redirected_outputs.stdout.is_empty());
+    assert!(redirected_outputs.stderr.is_empty());
+}
+
+#[test]
+fn failed_command_advisor_readiness_is_silent_and_requires_explicit_opt_in() {
+    let directory = tempfile::tempdir().unwrap();
+    let paths = Paths::under(directory.path().to_path_buf());
+    paths.create().unwrap();
+
+    let disabled =
+        run_failed_command_advisor_readiness(directory.path(), Some("zsh-integration-test"));
+    assert_eq!(disabled.status.code(), Some(78));
+    assert!(disabled.stdout.is_empty());
+    assert!(disabled.stderr.is_empty());
+
+    config::save(
+        &paths.config_file(),
+        &Config {
+            failed_command_advisor: true,
+            ..Config::default()
+        },
+    )
+    .unwrap();
+    let without_setup =
+        run_failed_command_advisor_readiness(directory.path(), Some("zsh-integration-test"));
+    assert_eq!(without_setup.status.code(), Some(78));
+    assert!(without_setup.stdout.is_empty());
+    assert!(without_setup.stderr.is_empty());
+
+    setup::save(&paths, &setup::Receipt::new(Some("zsh"))).unwrap();
+    let without_session = run_failed_command_advisor_readiness(directory.path(), None);
+    assert_eq!(without_session.status.code(), Some(78));
+    assert!(without_session.stdout.is_empty());
+    assert!(without_session.stderr.is_empty());
+
+    let wrong_session =
+        run_failed_command_advisor_readiness(directory.path(), Some("bash-integration-test"));
+    assert_eq!(wrong_session.status.code(), Some(78));
+    assert!(wrong_session.stdout.is_empty());
+    assert!(wrong_session.stderr.is_empty());
+
+    let ready =
+        run_failed_command_advisor_readiness(directory.path(), Some("zsh-integration-test"));
+    assert!(ready.status.success());
+    assert!(ready.stdout.is_empty());
+    assert!(ready.stderr.is_empty());
 }
 
 #[test]

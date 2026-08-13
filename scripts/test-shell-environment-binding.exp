@@ -1,0 +1,337 @@
+#!/usr/bin/env expect -f
+
+# Prove that automatic adapter calls remain attached to the exact shell
+# session and state/model/runtime environment active when the adapter was
+# sourced. This protects captured failed-command text from later direnv-style
+# overrides while keeping the original config file live.
+
+set timeout 10
+log_user 0
+
+set project_root [file normalize [file join [file dirname [info script]] ..]]
+set temp_root_base "/tmp"
+if {[info exists env(TMPDIR)] && $env(TMPDIR) ne ""} {
+    set temp_root_base $env(TMPDIR)
+}
+set temp_root [file join $temp_root_base "howto-env-binding-test.[pid].[clock clicks]"]
+if {[catch {file mkdir $temp_root} mkdir_error]} {
+    puts stderr "FAIL: could not create temporary directory: $mkdir_error"
+    exit 1
+}
+set fake_bin [file join $temp_root bin]
+set original_state [file join $temp_root original]
+set alternate_state [file join $temp_root alternate]
+set original_model [file join $temp_root original-model.gguf]
+set alternate_model [file join $temp_root alternate-model.gguf]
+set original_packaged_model [file join $temp_root original-packaged.gguf]
+set alternate_packaged_model [file join $temp_root alternate-packaged.gguf]
+set original_server [file join $temp_root original-llama-server]
+set alternate_server [file join $temp_root alternate-llama-server]
+set alternate_env [file join $temp_root alternate-env.sh]
+set alternate_env_fish [file join $temp_root alternate-env.fish]
+set original_runtime [file join $temp_root original-runtime]
+set alternate_runtime [file join $temp_root alternate-runtime]
+set original_tmp [file join $temp_root original-tmp]
+set alternate_tmp [file join $temp_root alternate-tmp]
+set original_path $env(PATH)
+file mkdir $fake_bin $original_state $alternate_state $original_runtime $alternate_runtime
+file mkdir $original_tmp $alternate_tmp
+
+proc write_text {path contents} {
+    set channel [open $path w]
+    puts -nonewline $channel $contents
+    close $channel
+}
+
+proc read_text {path} {
+    if {![file exists $path]} {
+        return ""
+    }
+    set channel [open $path r]
+    set contents [read $channel]
+    close $channel
+    return $contents
+}
+
+proc cleanup {} {
+    global spawn_id temp_root
+    if {[info exists spawn_id]} {
+        catch {send -- "\003"}
+        catch {close}
+        catch {wait}
+    }
+    catch {file delete -force -- $temp_root}
+}
+
+proc fail {message} {
+    cleanup
+    puts stderr "FAIL: $message"
+    exit 1
+}
+
+proc buffered_output {} {
+    global expect_out
+    if {[info exists expect_out(buffer)]} {
+        return $expect_out(buffer)
+    }
+    return "<no buffered output>"
+}
+
+proc find_program {name} {
+    set result [auto_execok $name]
+    if {[llength $result] == 0} {
+        return ""
+    }
+    return [lindex $result 0]
+}
+
+proc bash_supports_advisor {executable} {
+    global expect_out spawn_id
+    spawn -noecho $executable --noprofile --norc -c {
+        printf 'HOWTO_BASH_VERSION:%s.%s\n' "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"
+    }
+    set supported 0
+    expect {
+        -re {HOWTO_BASH_VERSION:([0-9]+)\.([0-9]+)} {
+            set major $expect_out(1,string)
+            set minor $expect_out(2,string)
+            set supported [expr {$major > 5 || ($major == 5 && $minor >= 1)}]
+            exp_continue
+        }
+        eof {}
+        timeout { fail "could not determine Bash version; output: [buffered_output]" }
+    }
+    catch {wait}
+    unset -nocomplain spawn_id
+    return $supported
+}
+
+proc expect_prompt {shell_name} {
+    expect {
+        -exact "HOWTO-TEST> " { return }
+        timeout { fail "$shell_name did not return to its prompt; output: [buffered_output]" }
+        eof { fail "$shell_name exited before displaying its prompt; output: [buffered_output]" }
+    }
+}
+
+proc expect_inserted {shell_name command_line} {
+    expect {
+        -exact $command_line { return }
+        timeout { fail "$shell_name did not insert from original state; output: [buffered_output]" }
+        eof { fail "$shell_name exited while inserting a pending command" }
+    }
+}
+
+proc start_shell {shell_name executable adapter} {
+    global env spawn_id
+    set env(HOWTO_TEST_ADAPTER) $adapter
+    switch -- $shell_name {
+        zsh {
+            spawn -noecho $executable -f
+            send -- {PROMPT='HOWTO-TEST> '; RPROMPT=; PROMPT2='HOWTO-CONT> '; setopt pipefail}
+            send -- "\r"
+        }
+        bash {
+            spawn -noecho $executable --noprofile --norc
+            send -- {unset PROMPT_COMMAND; PS1='HOWTO-TEST> '; PS2='HOWTO-CONT> '; HISTFILE=/dev/null; set -o history; set -o pipefail}
+            send -- "\r"
+        }
+        fish {
+            set previous_term $env(TERM)
+            set env(TERM) dumb
+            spawn -noecho $executable --no-config --interactive
+            set env(TERM) $previous_term
+            expect {
+                -glob {*> *} {}
+                timeout { fail "$shell_name did not finish startup; output: [buffered_output]" }
+                eof { fail "$shell_name exited during startup" }
+            }
+            send -- {set -e fish_private_mode; function fish_prompt; printf 'HOWTO-TEST> '; end}
+            send -- "\r"
+        }
+        default { fail "unknown shell: $shell_name" }
+    }
+    expect_prompt $shell_name
+    send -- "source \"\$HOWTO_TEST_ADAPTER\"\r"
+    expect_prompt $shell_name
+}
+
+proc apply_alternate_environment {shell_name} {
+    global alternate_state alternate_model alternate_packaged_model alternate_server
+    global alternate_runtime alternate_tmp temp_root
+    set alternate_path [file join $temp_root alternate-path]
+    file mkdir $alternate_path
+    switch -- $shell_name {
+        zsh {
+            send -- "source \"\$HOWTO_TEST_ALTERNATE_ENV\"\r"
+        }
+        bash {
+            send -- "source \"\$HOWTO_TEST_ALTERNATE_ENV\"\r"
+        }
+        fish {
+            send -- "source \"\$HOWTO_TEST_ALTERNATE_ENV_FISH\"\r"
+        }
+    }
+    expect_prompt $shell_name
+}
+
+proc send_failure {shell_name} {
+    set command_line {missing-env-binding-test --flag}
+    send -- "$command_line\r"
+    expect {
+        -exact "HOWTO-BOUND-ADVICE:$command_line" {}
+        timeout { fail "$shell_name did not advise through original state; output: [buffered_output]" }
+        eof { fail "$shell_name exited while advising" }
+    }
+    expect_prompt $shell_name
+}
+
+proc assert_bound_record {shell_name} {
+    global original_state alternate_state original_model alternate_model
+    global original_packaged_model alternate_packaged_model original_server alternate_server
+    global original_runtime alternate_runtime original_tmp alternate_tmp original_path
+
+    set record [string trim [read_text [file join $original_state calls.log]]]
+    if {$record eq ""} {
+        fail "$shell_name made no automatic calls in original state"
+    }
+    if {[string first "advisor-ready|$original_state|$original_model|$original_packaged_model|$original_server|$original_runtime|$original_tmp|$original_path|" $record] < 0} {
+        fail "$shell_name readiness did not receive the source-time environment: $record"
+    }
+    if {[string first "advise --status 127|$original_state|$original_model|$original_packaged_model|$original_server|$original_runtime|$original_tmp|$original_path|" $record] < 0} {
+        fail "$shell_name advice did not receive the source-time environment: $record"
+    }
+    if {[string first "shell take|$original_state|$original_model|$original_packaged_model|$original_server|$original_runtime|$original_tmp|$original_path|" $record] < 0} {
+        fail "$shell_name Tab did not receive the source-time environment: $record"
+    }
+    if {[string first "|$shell_name-" $record] < 0} {
+        fail "$shell_name did not retain its generated source-time session: $record"
+    }
+    foreach forbidden [list $alternate_state $alternate_model $alternate_packaged_model $alternate_server $alternate_runtime $alternate_tmp zsh-redirected bash-redirected fish-redirected] {
+        if {[string first $forbidden $record] >= 0} {
+            fail "$shell_name leaked a later environment override into an automatic call: $record"
+        }
+    }
+    if {[file exists [file join $alternate_state calls.log]] || [file exists [file join $alternate_state captured.log]]} {
+        fail "$shell_name sent automatic state or failed text to alternate state"
+    }
+}
+
+proc stop_shell {shell_name} {
+    global spawn_id
+    if {$shell_name eq "fish"} {
+        # The test intentionally replaced PATH with an empty fixture directory;
+        # restore a usable path before fish runs its exit-time handlers.
+        send -- "set -gx PATH \"\$HOWTO_TEST_ORIGINAL_PATH\"; builtin exit\r"
+    } else {
+        send -- "exit\r"
+    }
+    expect {
+        eof {}
+        timeout { fail "$shell_name did not exit cleanly; output: [buffered_output]" }
+    }
+    catch {wait}
+    unset -nocomplain spawn_id
+}
+
+set fake_howto [file join $fake_bin howto]
+write_text $fake_howto {#!/bin/sh
+log="$HOWTO_HOME/calls.log"
+printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+    "$*" "$HOWTO_HOME" "$HOWTO_MODEL" "$HOWTO_PACKAGED_MODEL" \
+    "$HOWTO_LLAMA_SERVER" "$XDG_RUNTIME_DIR" "$TMPDIR" "$PATH" \
+    "$HOWTO_SHELL_SESSION" >> "$log"
+if [ "$#" -eq 2 ] && [ "$1" = shell ] && [ "$2" = advisor-ready ]; then
+    [ "$(sed -n '1p' "$HOWTO_HOME/advisor.state")" = enabled ] || exit 78
+    exit 0
+fi
+if [ "$#" -eq 4 ] && [ "$1" = shell ] && [ "$2" = advise ] && [ "$3" = --status ]; then
+    command_line=$(cat) || exit 70
+    printf '%s\n' "$command_line" >> "$HOWTO_HOME/captured.log"
+    printf 'HOWTO-BOUND-ADVICE:%s\n' "$command_line"
+    exit 0
+fi
+if [ "$#" -eq 2 ] && [ "$1" = shell ] && [ "$2" = take ]; then
+    [ -s "$HOWTO_HOME/pending" ] || exit 1
+    IFS= read -r pending < "$HOWTO_HOME/pending" || exit 1
+    rm -f -- "$HOWTO_HOME/pending"
+    printf '%s\n' "$pending"
+    exit 0
+fi
+exit 64
+}
+file attributes $fake_howto -permissions 0755
+
+foreach path [list $original_model $alternate_model $original_packaged_model $alternate_packaged_model $original_server $alternate_server] {
+    write_text $path "fixture\n"
+}
+write_text [file join $original_state advisor.state] "enabled\n"
+write_text $alternate_env "export HOWTO_HOME='$alternate_state' HOWTO_MODEL='$alternate_model' HOWTO_PACKAGED_MODEL='$alternate_packaged_model' HOWTO_LLAMA_SERVER='$alternate_server' XDG_RUNTIME_DIR='$alternate_runtime' TMPDIR='$alternate_tmp' TMP='$alternate_tmp' TEMP='$alternate_tmp' HOWTO_SHELL_SESSION='zsh-redirected'\nPATH='$temp_root/alternate-path:/usr/bin:/bin'\nhash -r 2>/dev/null || rehash 2>/dev/null || true\n"
+write_text $alternate_env_fish "set -gx HOWTO_HOME '$alternate_state'\nset -gx HOWTO_MODEL '$alternate_model'\nset -gx HOWTO_PACKAGED_MODEL '$alternate_packaged_model'\nset -gx HOWTO_LLAMA_SERVER '$alternate_server'\nset -gx XDG_RUNTIME_DIR '$alternate_runtime'\nset -gx TMPDIR '$alternate_tmp'\nset -gx TMP '$alternate_tmp'\nset -gx TEMP '$alternate_tmp'\nset -gx PATH '$temp_root/alternate-path' /usr/bin /bin\nset -gx HOWTO_SHELL_SESSION 'fish-redirected'\n"
+
+set env(HOME) [file join $temp_root home]
+set env(ZDOTDIR) $env(HOME)
+set env(HISTFILE) /dev/null
+set env(HOWTO_HOME) $original_state
+set env(HOWTO_MODEL) $original_model
+set env(HOWTO_PACKAGED_MODEL) $original_packaged_model
+set env(HOWTO_LLAMA_SERVER) $original_server
+set env(XDG_RUNTIME_DIR) $original_runtime
+set env(TMPDIR) $original_tmp
+set env(TMP) $original_tmp
+set env(TEMP) $original_tmp
+set env(PATH) "$fake_bin:$original_path"
+set original_path $env(PATH)
+set env(TERM) xterm-256color
+set env(HOWTO_TEST_ALTERNATE_ENV) $alternate_env
+set env(HOWTO_TEST_ALTERNATE_ENV_FISH) $alternate_env_fish
+set env(HOWTO_TEST_ORIGINAL_PATH) $original_path
+file mkdir $env(HOME)
+file mkdir [file join $temp_root alternate-path]
+
+set tested 0
+foreach shell_name {zsh bash fish} {
+    set executable [find_program $shell_name]
+    if {$executable eq ""} {
+        puts "SKIP: $shell_name is not installed"
+        continue
+    }
+    if {$shell_name eq "bash" && ![bash_supports_advisor $executable]} {
+        puts "SKIP: bash is older than 5.1"
+        continue
+    }
+
+    file delete -force -- [file join $original_state calls.log]
+    file delete -force -- [file join $original_state captured.log]
+    file delete -force -- [file join $alternate_state calls.log]
+    file delete -force -- [file join $alternate_state captured.log]
+    set pending_command "printf howto-env-binding-$shell_name"
+    write_text [file join $original_state pending] "$pending_command\n"
+
+    set adapter [file join $project_root shell "howto.$shell_name"]
+    start_shell $shell_name $executable $adapter
+    apply_alternate_environment $shell_name
+    send_failure $shell_name
+    send -- "\t"
+    expect_inserted $shell_name $pending_command
+    if {$shell_name eq "fish"} {
+        # The base Tab PTY independently proves that insertion never submits.
+        # Accept this harmless fixture explicitly: fish can defer redrawing
+        # after Ctrl-C when its live PATH was replaced during this test.
+        send -- "\r"
+    } else {
+        send -- "\003"
+    }
+    expect_prompt $shell_name
+    assert_bound_record $shell_name
+    stop_shell $shell_name
+    puts "PASS: $shell_name source-time HowTo environment binding"
+    incr tested
+}
+
+if {$tested == 0} {
+    puts "SKIP: no supported test shell is installed"
+}
+
+cleanup
+exit 0

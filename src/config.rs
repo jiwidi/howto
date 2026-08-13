@@ -20,6 +20,7 @@ pub struct Config {
     pub max_tokens: usize,
     pub startup_timeout_seconds: u64,
     pub show_tab_hint: bool,
+    pub failed_command_advisor: bool,
     pub shell_path: PathBuf,
     pub model_id: String,
 }
@@ -38,6 +39,7 @@ impl Default for Config {
             max_tokens: 96,
             startup_timeout_seconds: 90,
             show_tab_hint: true,
+            failed_command_advisor: false,
             shell_path: PathBuf::from(if cfg!(target_os = "macos") {
                 "/bin/zsh"
             } else {
@@ -143,6 +145,12 @@ impl Config {
                 ));
             }
         }
+        if self.failed_command_advisor && self.server_url.is_some() {
+            return Err(Error::Configuration(
+                "failed_command_advisor is available only with the managed local model; run `howto config set failed_command_advisor false` before setting server_url"
+                    .into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -238,6 +246,19 @@ mod tests {
         let path = directory.path().join("config.json");
         std::fs::write(&path, br#"{"schema":1}"#).unwrap();
         assert!(load(&path).unwrap().show_tab_hint);
+        assert!(!load(&path).unwrap().failed_command_advisor);
+    }
+
+    #[test]
+    fn failed_command_advisor_cannot_use_a_configured_provider() {
+        let config = Config {
+            server_url: Some("https://provider.example".into()),
+            failed_command_advisor: true,
+            ..Config::default()
+        };
+        let error = config.validate().unwrap_err().to_string();
+        assert!(error.contains("managed local model"));
+        assert!(error.contains("failed_command_advisor false"));
     }
 
     #[test]

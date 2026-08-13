@@ -183,20 +183,7 @@ pub fn ensure_supported(kind: Kind) -> Result<()> {
         ));
     }
     for executable in &candidates {
-        let supported = Command::new(executable)
-            .args([
-                "--noprofile",
-                "--norc",
-                "-c",
-                "(( BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 1) ))",
-            ])
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success());
-        if supported {
+        if bash_version_at_least(executable, 4, 1) {
             return Ok(());
         }
     }
@@ -204,6 +191,35 @@ pub fn ensure_supported(kind: Kind) -> Result<()> {
         "{} is too old for context-aware Tab integration, and no newer bash was found in PATH; Bash 4.1 or newer is required",
         candidates[0].display()
     )))
+}
+
+/// Returns whether the installed adapter can provide failed-command advice for
+/// this shell. Tab insertion has a lower Bash requirement and remains usable
+/// on Bash 4.1 through 5.0.
+#[must_use]
+pub fn failed_command_advisor_supported(kind: Kind) -> bool {
+    kind != Kind::Bash
+        || find_shells(kind)
+            .iter()
+            .any(|executable| bash_version_at_least(executable, 5, 1))
+}
+
+fn bash_version_at_least(executable: &Path, major: u16, minor: u16) -> bool {
+    Command::new(executable)
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            &format!(
+                "(( BASH_VERSINFO[0] > {major} || (BASH_VERSINFO[0] == {major} && BASH_VERSINFO[1] >= {minor}) ))"
+            ),
+        ])
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 pub fn has_managed_artifacts(paths: &Paths, kind: Kind) -> Result<bool> {

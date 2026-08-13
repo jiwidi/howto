@@ -54,6 +54,7 @@ class Howto < Formula
     ENV.delete("HOWTO_PACKAGED_MODEL")
     model_status = shell_output("#{bin}/howto model status --json", 1)
     assert_match '"installed": false', model_status
+    assert_equal "false", shell_output("#{bin}/howto config get failed_command_advisor").strip
     shell_status = shell_output("#{bin}/howto shell status --json")
     assert_match '"setup_complete": false', shell_status
     assert_match "HOWTO_SHELL_SESSION", shell_output("#{bin}/howto shell init zsh")

@@ -42,10 +42,10 @@ passes the checker.
 |---|---|
 | `src/main.rs` | Thin process entry point, stderr error reporting, and exit status. |
 | `src/cli.rs` | Dependency-free argument grammar, front-only query options, help, and subcommands. |
-| `src/app.rs` | Use-case orchestration, stdout/stderr shape, selection, risk display, model prompts, diagnostics, and config commands. |
+| `src/app.rs` | Use-case orchestration, stdout/stderr shape, selection, risk display, query and advisor prompts, diagnostics, and config commands. |
 | `src/config.rs` | Versioned JSON schema, defaults, validation, atomic owner-only writes, and symlink refusal. |
 | `src/setup.rs` | Versioned setup receipt, setup serialization lock, atomic writes, and incomplete-state detection. |
-| `src/shell.rs` | zsh/Bash/fish adapter installation, startup-file management, and private session-scoped pending-command transfer. |
+| `src/shell.rs` | zsh/Bash/fish adapter installation, startup-file management, private pending-command transfer, and failed-command advisor dispatch. |
 | `src/paths.rs` | macOS-native, Linux XDG, runtime, and `HOWTO_HOME` paths with owner-only directories. |
 | `src/model.rs` | Model manifest, resolution precedence, resumable download, disk-space and range checks, locking, SHA-256 verification, and atomic install. |
 | `src/runtime.rs` | `llama-server` resolution, local process lifecycle, Unix-socket HTTP client, authentication, state identity, health, logs, and configured connections. |
@@ -96,12 +96,23 @@ setup workflow; JSON, quiet, piped, and other non-interactive requests fail
 before consuming request input. Help, version, setup, doctor, model, server,
 shell, and config operations remain available for repair.
 
-Setup is serialized with a private lock and writes the receipt only after the
-runtime/model phase and optional shell phase both finish. Local setup resolves
-`llama-server` before a potentially large download, verifies an existing
-managed artifact, and otherwise uses the resumable installer. A configured
-provider skips local runtime and model acquisition. Repeated setup repairs the
-same integration without adding duplicate startup blocks.
+Setup is serialized with a private lock. After the runtime/model phase and
+optional shell phase finish, it writes a recoverable receipt checkpoint before
+asking for the independent beta-advisor preference. This keeps startup files
+and setup state consistent if the user interrupts that final prompt; rerunning
+setup offers the unanswered prompt again. Local setup resolves `llama-server`
+before a potentially large download, verifies an existing managed artifact,
+and otherwise uses the resumable installer. A configured provider skips local
+runtime and model acquisition. Repeated setup repairs the same integration
+without adding duplicate startup blocks.
+
+After compatible shell integration is successfully configured, interactive
+setup can offer the beta failed-command advisor through a separate default-No
+prompt.
+Neither `--yes` nor a non-interactive setup implies consent. The preference
+defaults to false and remains false when the prompt cannot be shown. A
+configured `server_url` makes the advisor unavailable, so setup does not offer
+the feature in configured-provider mode.
 
 An unsupported automatically selected shell, declined symlink approval, or an
 unattended run that cannot request that approval is non-fatal: setup records
@@ -137,6 +148,38 @@ Normal Tab completion is preserved on nonempty buffers and when no command is
 pending. Bash uses its empty-line completion API and therefore requires Bash
 4.1 or newer; legacy macOS Bash is left unchanged, while macOS's default zsh
 is supported.
+
+The same adapter can observe failed top-level interactive commands when the
+separately opted-in beta advisor is active. zsh and fish support this path;
+Bash requires 5.1 or newer even though Tab insertion needs only 4.1. The
+adapter performs a silent, no-input readiness check before passing raw command
+text and numeric exit status to the application; a disabled preference causes
+no failed-command data transfer or inference. The application rechecks consent
+before reading the piped command. At activation, the adapter pins the absolute
+HowTo executable, session identifier, and environment values that select its
+state, model, and managed runtime. Every automatic call runs with that bounded
+environment, so a later project-local `PATH`, `HOWTO_HOME`, XDG, model, or
+runtime override cannot redirect captured text or pending Tab state. Config
+files under the bound state root remain live. The adapter does not capture
+command output, current directory, environment, directory listings, or file
+contents. Configuration validation makes
+`failed_command_advisor=true` and a non-null `server_url` mutually exclusive,
+and the application checks the preference again before starting inference.
+Eligible input is sent only to the managed `llama-server` over its authenticated
+private Unix socket. Runtime acquisition is nonblocking when another operation
+holds the server lock, and acquisition plus inference share a 20-second
+deadline. The resulting suggestion is printed as untrusted text; it
+is never executed, copied, placed in the line editor, or published as pending
+Tab state. HowTo does not persist failed-command or advisor history.
+
+The advisor boundary accepts only one literal external command no longer than
+4096 bytes and an exit status from 1 through 127. It rejects parse errors,
+additional or compound shell structure, redirections, expansions, globbing,
+shell wrappers and builtins, control and bidirectional-format characters,
+leading whitespace, and common secret-like markers or opaque values. A missing
+executable is eligible only with the standard command-not-found status 127;
+otherwise the executable must resolve through `PATH`. This heuristic reduces
+disclosure but cannot prove that a command contains no sensitive value.
 
 ## Model boundary
 
@@ -340,7 +383,10 @@ syncing both file and parent directory.
 `max_tokens` must be strictly smaller than `context_size`. Stored model,
 runtime, and shell paths must be absolute. The `show_tab_hint` boolean is a
 presentation preference: disabling it suppresses only the post-query reminder,
-not pending-command publication or Tab insertion.
+not pending-command publication or Tab insertion. The
+`failed_command_advisor` boolean defaults to false and is an explicit opt-in;
+it has no effect without compatible shell integration and the managed local
+provider.
 
 macOS follows native Application Support, Caches, and Logs locations. Linux
 follows XDG config, data, cache, state, and runtime locations. Without
