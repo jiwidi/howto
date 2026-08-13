@@ -78,6 +78,12 @@ pub struct Manager<'a> {
     paths: &'a Paths,
 }
 
+#[derive(Clone, Copy)]
+enum LockAcquisition {
+    Blocking,
+    NonBlocking,
+}
+
 impl<'a> Manager<'a> {
     #[must_use]
     pub const fn new(config: &'a Config, paths: &'a Paths) -> Self {
@@ -85,31 +91,99 @@ impl<'a> Manager<'a> {
     }
 
     pub fn ensure(&self, model_path: &Path) -> Result<Connection> {
+        self.ensure_with_options(model_path, LockAcquisition::Blocking, None)?
+            .ok_or_else(|| Error::Server("could not acquire the local server lock".into()))
+    }
+
+    /// Acquires the managed runtime without letting an automatic caller wait
+    /// behind another runtime operation or inherit the interactive startup
+    /// timeout. `None` means the server lock was already held, so the caller
+    /// can silently skip its optional work and try again later.
+    pub fn ensure_bounded(
+        &self,
+        model_path: &Path,
+        maximum_startup_timeout: Duration,
+    ) -> Result<Option<Connection>> {
+        if maximum_startup_timeout.is_zero() {
+            return Err(Error::Configuration(
+                "bounded server startup timeout must be greater than zero".into(),
+            ));
+        }
+        self.ensure_with_options(
+            model_path,
+            LockAcquisition::NonBlocking,
+            Some(maximum_startup_timeout),
+        )
+    }
+
+    fn ensure_with_options(
+        &self,
+        model_path: &Path,
+        lock_acquisition: LockAcquisition,
+        maximum_startup_timeout: Option<Duration>,
+    ) -> Result<Option<Connection>> {
         refuse_elevated()?;
         if let Some(url) = &self.config.server_url {
-            return external_connection(url);
+            return external_connection(url).map(Some);
         }
+
+        let configured_timeout = Duration::from_secs(self.config.startup_timeout_seconds);
+        let acquisition_deadline = maximum_startup_timeout.map(|maximum| {
+            Instant::now() + effective_startup_timeout(configured_timeout, Some(maximum))
+        });
 
         self.paths.create()?;
         validate_socket_length(&self.paths.server_socket_file())?;
-        let lock = open_private_file(&self.paths.server_lock_file(), false)?;
-        FileExt::lock_exclusive(&lock)?;
+        let Some(_lock) = acquire_server_lock(&self.paths.server_lock_file(), lock_acquisition)?
+        else {
+            return Ok(None);
+        };
 
         let server_path = resolve_llama_server(self.config)?;
         let fingerprint = fingerprint(model_path, &server_path, self.config)?;
         if let Some(state) = self.load_state()? {
             if self.state_is_current(&state, &fingerprint) && process_matches(&state) {
                 if let Ok(connection) = self.connection_for_state(&state) {
-                    if is_healthy_with_retries(&connection, REUSE_HEALTH_ATTEMPTS) {
-                        return Ok(connection);
+                    let healthy = if let Some(deadline) = acquisition_deadline {
+                        remaining_until(deadline).is_some_and(|remaining| {
+                            is_healthy_with_timeout(&connection, remaining.min(HEALTH_TIMEOUT))
+                        })
+                    } else {
+                        is_healthy_with_retries(&connection, REUSE_HEALTH_ATTEMPTS)
+                    };
+                    if healthy {
+                        return Ok(Some(connection));
                     }
                 }
+            }
+
+            // Automatic advice is optional. Never stop a live managed server
+            // (or wait for it to stop) in this path: another terminal may be
+            // starting it, or an explicit query may be using it. A later
+            // failed command can retry after that operation settles.
+            if acquisition_deadline.is_some() && process_matches(&state) {
+                return Ok(None);
             }
             self.stop_state_if_owned(&state)?;
             self.clean_state_files()?;
         }
 
-        self.start(model_path, &server_path, fingerprint)
+        let startup_timeout = match acquisition_deadline {
+            Some(deadline) => {
+                let Some(remaining) = remaining_until(deadline) else {
+                    return Ok(None);
+                };
+                remaining
+            }
+            None => configured_timeout,
+        };
+        self.start(
+            model_path,
+            &server_path,
+            fingerprint,
+            startup_timeout,
+            acquisition_deadline.is_some(),
+        )
     }
 
     pub fn status(&self) -> Result<Option<ServerState>> {
@@ -166,7 +240,9 @@ impl<'a> Manager<'a> {
         model_path: &Path,
         server_path: &Path,
         fingerprint: String,
-    ) -> Result<Connection> {
+        startup_timeout: Duration,
+        timeout_is_optional: bool,
+    ) -> Result<Option<Connection>> {
         self.clean_state_files()?;
         let api_key = generate_api_key();
         write_private(&self.paths.server_key_file(), api_key.as_bytes())?;
@@ -246,7 +322,7 @@ impl<'a> Manager<'a> {
                 return Err(error);
             }
         };
-        let deadline = Instant::now() + Duration::from_secs(self.config.startup_timeout_seconds);
+        let deadline = Instant::now() + startup_timeout;
         while Instant::now() < deadline {
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -266,18 +342,26 @@ impl<'a> Manager<'a> {
                     )));
                 }
             }
-            if is_healthy(&connection) {
-                return Ok(connection);
+            let Some(remaining) = remaining_until(deadline) else {
+                break;
+            };
+            if is_healthy_with_timeout(&connection, remaining.min(HEALTH_TIMEOUT)) {
+                return Ok(Some(connection));
             }
-            thread::sleep(Duration::from_millis(150));
+            if let Some(remaining) = remaining_until(deadline) {
+                thread::sleep(remaining.min(Duration::from_millis(150)));
+            }
         }
 
         let _ = child.kill();
         let _ = child.wait();
         self.clean_state_files()?;
+        if timeout_is_optional {
+            return Ok(None);
+        }
         Err(Error::Server(format!(
             "llama-server did not become ready within {} seconds{}",
-            self.config.startup_timeout_seconds,
+            duration_seconds_rounded_up(startup_timeout),
             log_suffix(&self.paths.server_log_file())
         )))
     }
@@ -571,9 +655,13 @@ fn external_connection(url: &str) -> Result<Connection> {
 }
 
 fn is_healthy(connection: &Connection) -> bool {
+    is_healthy_with_timeout(connection, HEALTH_TIMEOUT)
+}
+
+fn is_healthy_with_timeout(connection: &Connection, timeout: Duration) -> bool {
     connection
         .get("health")
-        .timeout(HEALTH_TIMEOUT)
+        .timeout(timeout)
         .send()
         .is_ok_and(|response| response.status().is_success())
 }
@@ -656,6 +744,34 @@ fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
     file.write_all(contents)?;
     file.sync_all()?;
     Ok(())
+}
+
+fn acquire_server_lock(path: &Path, acquisition: LockAcquisition) -> Result<Option<File>> {
+    let lock = open_private_file(path, false)?;
+    match acquisition {
+        LockAcquisition::Blocking => FileExt::lock_exclusive(&lock)?,
+        LockAcquisition::NonBlocking => match FileExt::try_lock_exclusive(&lock) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(error.into()),
+        },
+    }
+    Ok(Some(lock))
+}
+
+fn effective_startup_timeout(configured: Duration, maximum: Option<Duration>) -> Duration {
+    maximum.map_or(configured, |maximum| configured.min(maximum))
+}
+
+fn remaining_until(deadline: Instant) -> Option<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    (!remaining.is_zero()).then_some(remaining)
+}
+
+fn duration_seconds_rounded_up(duration: Duration) -> u64 {
+    duration
+        .as_secs()
+        .saturating_add(u64::from(duration.subsec_nanos() != 0))
 }
 
 fn open_private_file(path: &Path, truncate: bool) -> Result<File> {
@@ -743,7 +859,10 @@ fn process_command(pid: u32) -> Option<String> {
             return Some(command);
         }
     }
-    let output = Command::new("ps")
+    let ps = ["/bin/ps", "/usr/bin/ps"]
+        .into_iter()
+        .find(|candidate| Path::new(candidate).is_file())?;
+    let output = Command::new(ps)
         .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
         .output()
         .ok()?;
@@ -835,10 +954,14 @@ fn terminal_safe_log_text(value: &str) -> String {
 mod tests {
     use std::fs;
     use std::process::Command;
+    use std::time::Duration;
+
+    use fs2::FileExt;
 
     use super::{
-        configure_server_environment, first_valid_executable, generate_api_key, log_suffix,
-        probe_llama_server, validate_socket_length, LOG_TAIL_DISPLAY_BYTES,
+        acquire_server_lock, configure_server_environment, duration_seconds_rounded_up,
+        effective_startup_timeout, first_valid_executable, generate_api_key, log_suffix,
+        probe_llama_server, validate_socket_length, LockAcquisition, LOG_TAIL_DISPLAY_BYTES,
     };
     use crate::config::Config;
     use crate::paths::Paths;
@@ -855,6 +978,91 @@ mod tests {
     fn rejects_overlong_socket_paths() {
         let path = std::path::PathBuf::from(format!("/tmp/{}/server.sock", "x".repeat(200)));
         assert!(validate_socket_length(&path).is_err());
+    }
+
+    #[test]
+    fn bounded_startup_timeout_never_exceeds_caller_budget() {
+        assert_eq!(
+            effective_startup_timeout(Duration::from_secs(90), Some(Duration::from_secs(15))),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            effective_startup_timeout(Duration::from_secs(5), Some(Duration::from_secs(15))),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            effective_startup_timeout(Duration::from_secs(90), None),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            duration_seconds_rounded_up(Duration::from_millis(14_001)),
+            15
+        );
+    }
+
+    #[test]
+    fn nonblocking_runtime_lock_reports_contention() {
+        let directory = tempfile::Builder::new()
+            .prefix("ht-lock-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let paths = Paths::under(directory.path().join("home"));
+        paths.create().unwrap();
+        let held = acquire_server_lock(&paths.server_lock_file(), LockAcquisition::Blocking)
+            .unwrap()
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let config = Config::default();
+        let manager = super::Manager::new(&config, &paths);
+        assert!(manager
+            .ensure_bounded(
+                directory.path().join("missing.gguf").as_path(),
+                Duration::from_secs(15)
+            )
+            .unwrap()
+            .is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        FileExt::unlock(&held).unwrap();
+        assert!(
+            acquire_server_lock(&paths.server_lock_file(), LockAcquisition::NonBlocking)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_ensure_clamps_a_cold_start() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::Builder::new()
+            .prefix("ht-runtime-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let paths = Paths::under(directory.path().join("home"));
+        let server = directory.path().join("llama-server");
+        fs::write(&server, b"#!/bin/sh\nexec /bin/sleep 30\n").unwrap();
+        fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).unwrap();
+        let model = directory.path().join("model.gguf");
+        fs::write(&model, b"GGUF test model").unwrap();
+
+        let config = Config {
+            llama_server_path: Some(server),
+            startup_timeout_seconds: 90,
+            ..Config::default()
+        };
+        let manager = super::Manager::new(&config, &paths);
+        let started = std::time::Instant::now();
+        let connection = manager
+            .ensure_bounded(&model, Duration::from_millis(250))
+            .unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(connection.is_none());
+        assert!(!paths.server_state_file().exists());
+        assert!(!paths.server_key_file().exists());
     }
 
     #[test]

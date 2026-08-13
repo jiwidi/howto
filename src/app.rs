@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -487,6 +488,7 @@ fn run_setup_workflow(
         .map(|receipt| receipt.shell_startup_files.as_slice())
         .unwrap_or_default();
     let mut chosen_startup_files = Vec::new();
+
     let chosen_shell = if options.no_shell {
         for kind in shell::Kind::ALL {
             let recorded = if previous_shell == Some(kind) {
@@ -621,10 +623,81 @@ fn run_setup_workflow(
         }
     };
 
-    let mut new_receipt = setup::Receipt::new(None);
-    new_receipt.set_shell(chosen_shell.map(shell::Kind::name), chosen_startup_files);
-    if let Err(error) = setup::save(paths, &new_receipt) {
+    // Persist a recoverable shell checkpoint before the optional advisor
+    // prompt. If Ctrl-C terminates the process at that prompt, setup state and
+    // startup files still agree, the advisor remains disabled, and rerunning
+    // setup offers the prompt again.
+    let previous_advisor_prompted = previous
+        .as_ref()
+        .is_some_and(|receipt| receipt.failed_command_advisor_prompted);
+    let mut checkpoint_receipt = setup::Receipt::new(None);
+    checkpoint_receipt.set_shell(
+        chosen_shell.map(shell::Kind::name),
+        chosen_startup_files.clone(),
+    );
+    checkpoint_receipt.failed_command_advisor_prompted = previous_advisor_prompted;
+    if let Err(error) = setup::save(paths, &checkpoint_receipt) {
         return Err(with_shell_rollback(error, &shell_changes));
+    }
+
+    let mut new_config = config.clone();
+    let mut advisor_prompted = previous_advisor_prompted;
+    if let Some(kind) = chosen_shell.filter(|kind| {
+        config.server_url.is_none() && shell::failed_command_advisor_supported(*kind)
+    }) {
+        if config.failed_command_advisor {
+            advisor_prompted = true;
+        } else if !advisor_prompted && interactive() {
+            let enabled = prompt_yes_no(
+                "Enable the beta failed-command advisor? It sends only raw failed-command text and its exit status to the managed local model, then prints a suggestion without running it. [y/N] ",
+                false,
+            )?;
+            new_config.failed_command_advisor = enabled;
+            advisor_prompted = true;
+            if enabled {
+                eprintln!("Enabled the beta failed-command advisor for {kind}.");
+            } else {
+                eprintln!("The beta failed-command advisor remains disabled.");
+            }
+        }
+    }
+
+    let config_changed = new_config != *config;
+    if config_changed {
+        if let Err(error) = config::save(&paths.config_file(), &new_config) {
+            if let Some(previous) = &previous {
+                if let Err(restore) = setup::save(paths, previous) {
+                    return Err(Error::Configuration(format!(
+                        "{error}; restoring the previous setup state also failed: {restore}"
+                    )));
+                }
+                return Err(with_shell_rollback(error, &shell_changes));
+            }
+            // On first setup, retaining the valid checkpoint is safer than
+            // deleting state after startup files have been committed.
+            return Err(error);
+        }
+    }
+
+    let mut new_receipt = checkpoint_receipt;
+    new_receipt.failed_command_advisor_prompted = advisor_prompted;
+    if let Err(error) = setup::save(paths, &new_receipt) {
+        if config_changed {
+            if let Err(restore) = config::save(&paths.config_file(), config) {
+                return Err(Error::Configuration(format!(
+                    "{error}; restoring the previous configuration also failed: {restore}"
+                )));
+            }
+        }
+        if let Some(previous) = &previous {
+            if let Err(restore) = setup::save(paths, previous) {
+                return Err(Error::Configuration(format!(
+                    "{error}; restoring the previous setup state also failed: {restore}"
+                )));
+            }
+            return Err(with_shell_rollback(error, &shell_changes));
+        }
+        return Err(error);
     }
     eprintln!("HowTo setup is complete.");
     if chosen_shell.is_some() && env::var_os(shell::SESSION_ENV).is_none() {
@@ -960,6 +1033,8 @@ fn run_shell(command: ShellCommand) -> Result<i32> {
                 Ok(1)
             }
         }
+        ShellCommand::AdvisorReady => run_failed_command_advisor_readiness(),
+        ShellCommand::Advise { status } => run_failed_command_advisor(status),
         ShellCommand::Enable { shell: name } => {
             runtime::refuse_elevated()?;
             let paths = Paths::discover()?;
@@ -1084,6 +1159,7 @@ fn run_shell(command: ShellCommand) -> Result<i32> {
         ShellCommand::Status { json } => {
             let paths = Paths::discover()?;
             let receipt = setup::load(&paths)?;
+            let config = config::load(&paths.config_file())?;
             let configured_shell = receipt
                 .as_ref()
                 .and_then(|state| state.shell.as_deref())
@@ -1104,6 +1180,13 @@ fn run_shell(command: ShellCommand) -> Result<i32> {
                     .ok()
                     .flatten()
                     .is_some_and(|kind| Some(kind) == configured_shell);
+            let advisor_supported =
+                configured_shell.is_some_and(shell::failed_command_advisor_supported);
+            let advisor_enabled = enabled
+                && advisor_supported
+                && config.failed_command_advisor
+                && config.server_url.is_none();
+            let advisor_active = advisor_enabled && active;
             if json {
                 println!(
                     "{}",
@@ -1112,11 +1195,16 @@ fn run_shell(command: ShellCommand) -> Result<i32> {
                         "shell": configured_shell.map(shell::Kind::name),
                         "configured": enabled,
                         "active_in_this_shell": active,
+                        "failed_command_advisor": {
+                            "enabled": advisor_enabled,
+                            "supported": advisor_supported,
+                            "active_in_this_shell": advisor_active,
+                        },
                     }))?
                 );
             } else {
                 println!(
-                    "Tab integration: {}",
+                    "Shell integration: {}",
                     if enabled {
                         "configured"
                     } else {
@@ -1130,10 +1218,136 @@ fn run_shell(command: ShellCommand) -> Result<i32> {
                     "Current shell: {}",
                     if active { "active" } else { "not active" }
                 );
+                println!(
+                    "Failed-command advisor: {}",
+                    if advisor_active {
+                        "active (beta)"
+                    } else if advisor_enabled {
+                        "enabled; open a new terminal to activate"
+                    } else if config.failed_command_advisor && !advisor_supported {
+                        "enabled in configuration but unsupported by this shell"
+                    } else {
+                        "disabled"
+                    }
+                );
             }
             Ok(0)
         }
     }
+}
+
+const ADVISOR_UNAVAILABLE_EXIT: i32 = 78;
+// Runtime acquisition and inference share one prompt-delay budget. Explicit
+// queries keep the configured startup timeout (90 seconds by default, up to
+// 600 seconds).
+const ADVISOR_TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
+
+fn run_failed_command_advisor_readiness() -> Result<i32> {
+    runtime::refuse_elevated()?;
+    let paths = Paths::discover()?;
+    let config = config::load(&paths.config_file())?;
+    let receipt = setup::load(&paths)?;
+    if failed_command_advisor_available(&config, receipt.as_ref(), shell::session_kind()?)? {
+        Ok(0)
+    } else {
+        Ok(ADVISOR_UNAVAILABLE_EXIT)
+    }
+}
+
+fn run_failed_command_advisor(status: u16) -> Result<i32> {
+    let deadline = Instant::now() + ADVISOR_TOTAL_TIMEOUT;
+    runtime::refuse_elevated()?;
+    // The hook pipes only stdin. Requiring both output streams to remain
+    // attached to the terminal prevents background, redirected, or captured
+    // invocations from turning this beta feature into an implicit data path.
+    if !io::stdout().is_terminal() || !io::stderr().is_terminal() {
+        return Ok(ADVISOR_UNAVAILABLE_EXIT);
+    }
+    let paths = Paths::discover()?;
+    paths.create()?;
+    let config = config::load(&paths.config_file())?;
+
+    // Keep the actual data-taking path independently gated even though the
+    // adapter probes readiness before it sends any command text.
+    let receipt = setup::load(&paths)?;
+    if !failed_command_advisor_available(&config, receipt.as_ref(), shell::session_kind()?)? {
+        return Ok(ADVISOR_UNAVAILABLE_EXIT);
+    }
+
+    let Some(failed_command) = read_failed_command()? else {
+        return Ok(1);
+    };
+    if !crate::advisor::is_eligible(&failed_command, status) {
+        return Ok(1);
+    }
+
+    // No setup or download prompt is allowed from an automatic shell hook.
+    let Some(model) = model::resolve(&config, &paths)? else {
+        return Err(Error::Model(
+            "the local model is unavailable; run `howto setup` to repair it".into(),
+        ));
+    };
+    let manager = Manager::new(&config, &paths);
+    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        return Ok(1);
+    };
+    let Some(connection) = manager.ensure_bounded(model.path(), remaining)? else {
+        // Lock contention is transient (for example, another terminal may be
+        // starting the server), so skip this suggestion without disabling the
+        // advisor for the rest of the shell session.
+        return Ok(1);
+    };
+    if !connection.managed {
+        // Defense in depth if provider routing changes after the config gate.
+        return Ok(ADVISOR_UNAVAILABLE_EXIT);
+    }
+    let platform = Platform::current();
+    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        return Ok(1);
+    };
+    let Some(suggestion) = Generator::new(&connection, &config, platform).advise_failed_command(
+        &failed_command,
+        status,
+        remaining,
+    )?
+    else {
+        return Ok(1);
+    };
+    let assessment = assess(&suggestion, platform);
+
+    println!("HowTo beta suggestion (review only; not executed):");
+    println!("  {suggestion}");
+    print_findings(&assessment);
+    Ok(0)
+}
+
+fn failed_command_advisor_available(
+    config: &Config,
+    receipt: Option<&setup::Receipt>,
+    session: Option<shell::Kind>,
+) -> Result<bool> {
+    if !config.failed_command_advisor || config.server_url.is_some() {
+        return Ok(false);
+    }
+    let configured = receipt
+        .and_then(|receipt| receipt.shell.as_deref())
+        .map(str::parse::<shell::Kind>)
+        .transpose()?;
+    Ok(configured.is_some() && configured == session)
+}
+
+fn read_failed_command() -> Result<Option<String>> {
+    let mut bytes = Vec::new();
+    io::stdin()
+        .take(crate::advisor::MAX_FAILED_COMMAND_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > crate::advisor::MAX_FAILED_COMMAND_BYTES {
+        return Ok(None);
+    }
+    let Ok(command) = String::from_utf8(bytes) else {
+        return Ok(None);
+    };
+    Ok(Some(command))
 }
 
 fn run_doctor(json_output: bool, deep: bool) -> Result<i32> {
@@ -1302,6 +1516,7 @@ fn config_value(config: &Config, key: &str) -> Result<String> {
         "max_tokens" => Ok(config.max_tokens.to_string()),
         "startup_timeout_seconds" => Ok(config.startup_timeout_seconds.to_string()),
         "show_tab_hint" => Ok(config.show_tab_hint.to_string()),
+        "failed_command_advisor" => Ok(config.failed_command_advisor.to_string()),
         "shell_path" => Ok(config.shell_path.display().to_string()),
         "model_id" => Ok(config.model_id.clone()),
         _ => Err(Error::Usage(format!("unknown config key `{key}`"))),
@@ -1330,6 +1545,10 @@ fn set_config_value(config: &mut Config, key: &str, value: Option<&str>) -> Resu
         }
         "show_tab_hint" => {
             config.show_tab_hint = parse_or_default(value, defaults.show_tab_hint, key)?;
+        }
+        "failed_command_advisor" => {
+            config.failed_command_advisor =
+                parse_or_default(value, defaults.failed_command_advisor, key)?;
         }
         "shell_path" => {
             config.shell_path = value.map_or(defaults.shell_path, PathBuf::from);
@@ -1361,6 +1580,7 @@ fn print_config(config: &Config) {
         "max_tokens",
         "startup_timeout_seconds",
         "show_tab_hint",
+        "failed_command_advisor",
         "shell_path",
         "model_id",
     ] {
@@ -1372,8 +1592,9 @@ fn print_config(config: &Config) {
 
 #[cfg(test)]
 mod tests {
-    use super::{config_value, read_prompt, set_config_value};
+    use super::{config_value, failed_command_advisor_available, read_prompt, set_config_value};
     use crate::config::Config;
+    use crate::{setup, shell};
 
     #[test]
     fn config_updates_are_validated() {
@@ -1388,6 +1609,13 @@ mod tests {
         assert!(!config.show_tab_hint);
         assert_eq!(config_value(&config, "show_tab_hint").unwrap(), "false");
         assert!(set_config_value(&mut config, "show_tab_hint", Some("sometimes")).is_err());
+
+        set_config_value(&mut config, "failed_command_advisor", Some("true")).unwrap();
+        assert!(config.failed_command_advisor);
+        assert_eq!(
+            config_value(&config, "failed_command_advisor").unwrap(),
+            "true"
+        );
     }
 
     #[test]
@@ -1395,12 +1623,54 @@ mod tests {
         let mut config = Config {
             model_id: "custom".into(),
             show_tab_hint: false,
+            failed_command_advisor: true,
             ..Config::default()
         };
         set_config_value(&mut config, "model_id", None).unwrap();
         set_config_value(&mut config, "show_tab_hint", None).unwrap();
+        set_config_value(&mut config, "failed_command_advisor", None).unwrap();
         assert_eq!(config.model_id, Config::default().model_id);
         assert!(config.show_tab_hint);
+        assert!(!config.failed_command_advisor);
+    }
+
+    #[test]
+    fn failed_command_advisor_requires_local_config_setup_and_matching_session() {
+        let enabled = Config {
+            failed_command_advisor: true,
+            ..Config::default()
+        };
+        let receipt = setup::Receipt::new(Some("zsh"));
+
+        assert!(!failed_command_advisor_available(&enabled, None, Some(shell::Kind::Zsh)).unwrap());
+        assert!(!failed_command_advisor_available(&enabled, Some(&receipt), None).unwrap());
+        assert!(!failed_command_advisor_available(
+            &enabled,
+            Some(&receipt),
+            Some(shell::Kind::Bash)
+        )
+        .unwrap());
+        assert!(
+            failed_command_advisor_available(&enabled, Some(&receipt), Some(shell::Kind::Zsh))
+                .unwrap()
+        );
+
+        let disabled = Config::default();
+        assert!(!failed_command_advisor_available(
+            &disabled,
+            Some(&receipt),
+            Some(shell::Kind::Zsh)
+        )
+        .unwrap());
+        let remote = Config {
+            failed_command_advisor: true,
+            server_url: Some("https://provider.example".into()),
+            ..Config::default()
+        };
+        assert!(
+            !failed_command_advisor_available(&remote, Some(&receipt), Some(shell::Kind::Zsh))
+                .unwrap()
+        );
     }
 
     #[test]

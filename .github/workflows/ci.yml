@@ -68,13 +68,18 @@ jobs:
             | grep -Fxq -- --yes
           cargo build --locked --bin howto
           expect -f scripts/test-shell-integration.exp
+          expect -f scripts/test-failed-command-advisor.exp
+          expect -f scripts/test-shell-environment-binding.exp
           expect -f scripts/test-setup-symlink.exp
+          expect -f scripts/test-setup-advisor-consent.exp
+          python3 scripts/test-failed-command-advisor-binary.py
           python3 scripts/test-tab-hint.py
           ruby -c Formula/howto.rb
           PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" \
             python3 -m py_compile \
               scripts/create-release-archive.py \
               scripts/generate-third-party-licenses.py \
+              scripts/test-failed-command-advisor-binary.py \
               scripts/test-tab-hint.py
           scripts/render-homebrew-formula.sh \
             0.1.0 \
@@ -155,5 +160,11 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           expect -f scripts/test-shell-integration.exp
+          expect -f scripts/test-failed-command-advisor.exp
+          expect -f scripts/test-shell-environment-binding.exp
           HOWTO_TEST_BINARY="target/${{ matrix.target }}/release/howto" \
             expect -f scripts/test-setup-symlink.exp
+          HOWTO_TEST_BINARY="target/${{ matrix.target }}/release/howto" \
+            expect -f scripts/test-setup-advisor-consent.exp
+          HOWTO_TEST_BINARY="target/${{ matrix.target }}/release/howto" \
+            python3 scripts/test-failed-command-advisor-binary.py

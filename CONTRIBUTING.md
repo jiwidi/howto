@@ -47,13 +47,19 @@ shellcheck scripts/render-homebrew-formula.sh completions/howto.bash shell/howto
 zsh -n completions/_howto shell/howto.zsh
 fish --no-config --no-execute completions/howto.fish shell/howto.fish
 expect -f scripts/test-shell-integration.exp
+expect -f scripts/test-failed-command-advisor.exp
+expect -f scripts/test-shell-environment-binding.exp
 expect -f scripts/test-setup-symlink.exp
+expect -f scripts/test-setup-advisor-consent.exp
+python3 scripts/test-failed-command-advisor-binary.py
 python3 scripts/test-tab-hint.py
 actionlint -no-color
 ruby -c Formula/howto.rb
 PYTHONPYCACHEPREFIX=/tmp/howto-pycache python3 -m py_compile \
   scripts/create-release-archive.py \
-  scripts/generate-third-party-licenses.py
+  scripts/generate-third-party-licenses.py \
+  scripts/test-failed-command-advisor-binary.py \
+  scripts/test-tab-hint.py
 cargo fetch --locked
 scripts/generate-third-party-licenses.py --check
 git diff --check
