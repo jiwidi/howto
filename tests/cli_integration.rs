@@ -190,12 +190,13 @@ fn run_failed_command_advisor(
         command.env_remove(shell::SESSION_ENV);
     }
     let mut child = command.spawn().unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(failed_command)
-        .unwrap();
+    let write_result = child.stdin.take().unwrap().write_all(failed_command);
+    if let Err(error) = write_result {
+        // The advisor intentionally rejects redirected output before reading
+        // stdin. A fast child may therefore close the pipe before this helper
+        // writes its fixture, especially on Linux CI.
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
     child.wait_with_output().unwrap()
 }
 
