@@ -15,7 +15,7 @@ function __howto_management_is
             string match -q -- '-*' $words[3]
         case model
             test (count $words) -eq 2; and return 0
-            contains -- $words[3] status install; or string match -q -- '-*' $words[3]
+            contains -- $words[3] status list install; or string match -q -- '-*' $words[3]
         case server
             test (count $words) -eq 2; and return 0
             contains -- $words[3] status stop; or string match -q -- '-*' $words[3]
@@ -66,6 +66,14 @@ function __howto_boolean_config_value_context
     and contains -- $words[4] show_tab_hint failed_command_advisor
 end
 
+function __howto_accelerator_config_value_context
+    set -l words (commandline -opc)
+    test (count $words) -eq 4; or return 1
+    test "$words[2]" = config
+    and test "$words[3]" = set
+    and test "$words[4]" = accelerator
+end
+
 function __howto_query_option_context
     for target in setup doctor model server shell config help version
         __howto_management_is $target; and return 1
@@ -112,11 +120,13 @@ for command in howto
     complete -c $command -n '__howto_query_option_context' -l timing -d 'Show generation timing'
     complete -c $command -n '__howto_management_is doctor' -a '--json --deep'
     complete -c $command -n '__howto_management_is setup' -s y -l yes -d 'Accept default-Yes setup prompts'
+    complete -c $command -n '__howto_management_is setup' -l model -x -a 'compact balanced accurate' -d 'Select a qualified model profile'
     complete -c $command -n '__howto_management_is setup' -l no-shell -d 'Disable Tab integration'
     complete -c $command -n '__howto_management_is setup' -l shell -x -a 'zsh bash fish' -d 'Configure a shell'
-    complete -c $command -n '__howto_management_root_is model' -a 'status install --json --deep'
+    complete -c $command -n '__howto_management_root_is model' -a 'status list install --json --deep'
     complete -c $command -n '__howto_management_action_is model status; or __howto_management_option_led model' -a '--json --deep'
-    complete -c $command -n '__howto_management_action_is model install' -a '-y --yes'
+    complete -c $command -n '__howto_management_action_is model list' -a '--json'
+    complete -c $command -n '__howto_management_action_is model install' -a 'compact balanced accurate -y --yes'
     complete -c $command -n '__howto_management_root_is server' -a 'status stop --json'
     complete -c $command -n '__howto_management_action_is server status; or __howto_management_option_led server' -a '--json'
     complete -c $command -n '__howto_management_action_is server stop' -a '--json'
@@ -126,6 +136,7 @@ for command in howto
     complete -c $command -n '__howto_management_action_is shell status' -a '--json'
     complete -c $command -n '__howto_management_root_is config' -a 'list path get set unset --json'
     complete -c $command -n '__howto_management_action_is config list' -a '--json'
-    complete -c $command -n '__howto_config_key_context' -a 'model_path llama_server_path server_url threads context_size max_tokens startup_timeout_seconds show_tab_hint failed_command_advisor shell_path model_id'
+    complete -c $command -n '__howto_config_key_context' -a 'model_profile model_path llama_server_path server_url threads context_size max_tokens startup_timeout_seconds accelerator show_tab_hint failed_command_advisor shell_path model_id'
     complete -c $command -n '__howto_boolean_config_value_context' -a 'true false'
+    complete -c $command -n '__howto_accelerator_config_value_context' -a 'auto cpu'
 end

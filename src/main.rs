@@ -1,5 +1,7 @@
 fn main() {
-    match howto::cli::run_from_env() {
+    let result =
+        howto::engine_runtime::run_worker_from_env().unwrap_or_else(howto::cli::run_from_env);
+    match result {
         Ok(0) => {}
         Ok(code) => std::process::exit(code),
         Err(error) => {

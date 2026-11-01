@@ -143,6 +143,36 @@ impl Paths {
     pub fn server_log_file(&self) -> PathBuf {
         self.logs_dir.join("llama-server.log")
     }
+
+    #[must_use]
+    pub fn engine_state_file(&self) -> PathBuf {
+        self.runtime_dir.join("engine.json")
+    }
+
+    #[must_use]
+    pub fn engine_lock_file(&self) -> PathBuf {
+        self.runtime_dir.join("engine.lock")
+    }
+
+    #[must_use]
+    pub fn engine_key_file(&self) -> PathBuf {
+        self.runtime_dir.join("engine.key")
+    }
+
+    #[must_use]
+    pub fn engine_socket_file(&self) -> PathBuf {
+        self.runtime_dir.join("engine.sock")
+    }
+
+    #[must_use]
+    pub fn engine_launch_file(&self) -> PathBuf {
+        self.runtime_dir.join("engine-launch.json")
+    }
+
+    #[must_use]
+    pub fn engine_log_file(&self) -> PathBuf {
+        self.logs_dir.join("engine.log")
+    }
 }
 
 fn environment_directory(name: &str) -> Result<Option<PathBuf>> {
@@ -234,6 +264,14 @@ mod tests {
         assert_eq!(
             paths.server_state_file(),
             PathBuf::from("/tmp/howto-test/run/server.json")
+        );
+        assert_eq!(
+            paths.engine_state_file(),
+            PathBuf::from("/tmp/howto-test/run/engine.json")
+        );
+        assert_eq!(
+            paths.engine_socket_file(),
+            PathBuf::from("/tmp/howto-test/run/engine.sock")
         );
     }
 

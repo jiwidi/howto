@@ -10,15 +10,16 @@ run have their own policies and logs.
 
 ## Default local mode
 
-For each query, HowTo sends two messages to a locally managed
-`llama-server`: a fixed platform-specific system instruction and the request
-you entered. The response is processed locally. Communication uses a private
-Unix-domain socket with a random per-launch bearer token; the managed runtime
-is started with network features and its Web UI disabled.
+For each query, HowTo sends a fixed platform-specific system instruction and
+the request you entered to its embedded llama.cpp engine. The same `howto`
+binary runs as a resident worker; the short-lived CLI communicates with it over
+an owner-only Unix-domain socket using a random per-launch authorization key and
+a bounded framed protocol. Local inference opens no TCP port, exposes no HTTP
+API or Web UI, and does not invoke a separately installed model server.
 
 If you separately opt in to the beta failed-command advisor, an active shell
 adapter automatically sends the raw text of a failed interactive command and
-its numeric exit status to that same managed local model. The advisor does not
+its numeric exit status to that same embedded local model. The advisor does not
 capture command output, the current directory, environment variables,
 directory listings, or file contents. It prints the model's suggestion for
 review and never executes, copies, inserts, or stages it for Tab.
@@ -33,17 +34,22 @@ current directory, directory listings, or file contents either.
 
 HowTo does make ordinary outbound download requests in two situations:
 
-- Homebrew downloads HowTo, its build dependencies, and `llama.cpp`.
-- During `howto setup`, after confirmation, HowTo downloads the pinned model artifact
-  from Hugging Face. This sends normal connection metadata such as your IP
-  address and HTTP headers to the model host, but not your HowTo prompts.
+- Homebrew downloads HowTo and any build dependencies needed by the formula.
+  The installed binary already contains the native inference runtime.
+- During `howto setup`, after confirmation, HowTo downloads the pinned artifact
+  bundle for the selected published profile from its model host. This sends
+  normal connection metadata such as your IP address and HTTP headers to that
+  host, but not your HowTo prompts.
 
 The model download can also be started explicitly with
-`howto model install --yes`.
+`howto model install [profile] --yes`. Compact, Balanced, and Accurate are
+currently unpublished, so those selections fail before any download; the
+catalog activates one only after immutable artifact qualification and
+distribution approval.
 
 ## Configured providers
 
-If `server_url` is set, HowTo does not use or start the managed local model.
+If `server_url` is set, HowTo does not use or start the embedded local model.
 It sends the platform instruction and your complete request to the configured
 endpoint's `/v1/chat/completions` route. The endpoint receives the selected
 `model_id` and generation settings. If `HOWTO_API_KEY` is set, it also
@@ -82,9 +88,9 @@ howto config unset model_id
 |---|---|---|---|
 | Configuration | `~/Library/Application Support/HowTo/config.json` | `${XDG_CONFIG_HOME:-~/.config}/howto/config.json` | Until you change or remove it. |
 | Setup receipt and shell adapter | `~/Library/Application Support/HowTo/` | Config and data paths under `${XDG_CONFIG_HOME:-~/.config}/howto/` and `${XDG_DATA_HOME:-~/.local/share}/howto/` | Persists until removed; the receipt records the selected shell, exact managed startup paths, and whether the beta advisor prompt has already been shown. `howto shell disable` removes that adapter and its managed blocks. |
-| Managed model | `~/Library/Application Support/HowTo/models/` | `${XDG_DATA_HOME:-~/.local/share}/howto/models/` | Persists across runs and Homebrew upgrades or uninstall. |
-| Runtime log | `~/Library/Logs/HowTo/llama-server.log` | `${XDG_STATE_HOME:-~/.local/state}/howto/log/llama-server.log` | Rotated at server start after 2 MiB; at most the current log and one `.1` backup are managed. |
-| Runtime state, local token, and pending Tab command | `$XDG_RUNTIME_DIR/howto/`, or `$TMPDIR/howto-UID/` without it | `$XDG_RUNTIME_DIR/howto/`, or `$TMPDIR/howto-UID/` without it | Server state is replaced during its lifecycle. A pending command is session-scoped, expires after ten minutes, and is deleted when inserted. |
+| Managed models | `~/Library/Application Support/HowTo/models/` | `${XDG_DATA_HOME:-~/.local/share}/howto/models/` | Published catalog bundles use one directory per immutable artifact ID and persist across runs, profile changes, Homebrew upgrades, or uninstall. The old flat legacy artifact remains readable after upgrade. |
+| Engine log | `~/Library/Logs/HowTo/engine.log` | `${XDG_STATE_HOME:-~/.local/state}/howto/log/engine.log` | Rotated at engine start after 2 MiB; at most the current log and one `.1` backup are managed. A legacy `llama-server.log` may remain from an older release until the user removes it. |
+| Runtime state, local IPC key, and pending Tab command | `$XDG_RUNTIME_DIR/howto/`, or `$TMPDIR/howto-UID/` without it | `$XDG_RUNTIME_DIR/howto/`, or `$TMPDIR/howto-UID/` without it | Engine state is replaced during its lifecycle. A pending command is session-scoped, expires after ten minutes, and is deleted when inserted. Legacy `server.*` state is used only for safe upgrade cleanup. |
 | Cache directory | `~/Library/Caches/HowTo/` | `${XDG_CACHE_HOME:-~/.cache}/howto/` | Reserved for local cache data. |
 
 All of these locations can be redirected under a single absolute directory
@@ -111,8 +117,9 @@ integration access or when integration is disabled. In addition:
   history and remains inactive when that history is disabled;
 - command-line arguments can briefly be visible through local process-listing
   tools;
-- `llama-server` writes an operational log and its exact contents may vary by
-  the Homebrew runtime version;
+- the embedded engine writes an operational log; HowTo does not intentionally
+  log prompts or generated commands, but native-library diagnostics may vary by
+  the locked runtime revision;
 - terminal emulators, session recorders, CI systems, and redirected stdout or
   stderr may retain requests, generated commands, and findings;
 - the shell adapter adds a marked source block to the selected startup file(s);
@@ -136,13 +143,13 @@ It does not prevent terminal or runtime logging.
 
 ## Secrets
 
-The managed local bearer token is generated randomly, stored in the private
-runtime directory, and never reused as a provider credential.
+The embedded engine's local authorization key is generated randomly, stored in
+the private runtime directory, and never reused as a provider credential.
 
-The managed `llama-server` receives an allowlisted environment rather than the
-caller's complete environment. In particular, HowTo does not forward proxy,
-credential, or `LLAMA_ARG_*` variables that could enable prompt logging or
-override its offline/private-socket launch policy.
+The same-binary engine worker receives an allowlisted environment rather than
+the caller's complete environment. In particular, HowTo does not forward
+proxy, credential, dynamic-loader, language-runtime injection, or
+`LLAMA_ARG_*` variables that could redirect its private local policy.
 
 `HOWTO_API_KEY` is read from the process environment and is not written into
 HowTo's configuration by the CLI. It is sent to configured-provider
@@ -180,7 +187,8 @@ shell integration:
 howto config set failed_command_advisor false
 ```
 
-Stop the managed server before removing its files:
+Stop the embedded engine (and any detected pre-upgrade server) before removing
+its files:
 
 ```sh
 howto server stop

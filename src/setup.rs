@@ -19,6 +19,8 @@ pub const SHELL_INTEGRATION_SCHEMA: u32 = 2;
 pub struct Receipt {
     pub schema: u32,
     pub completed_at: u64,
+    #[serde(default = "setup_complete_default")]
+    pub complete: bool,
     pub shell: Option<String>,
     pub shell_integration_schema: Option<u32>,
     #[serde(default)]
@@ -36,6 +38,7 @@ impl Receipt {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            complete: true,
             shell: shell.map(str::to_owned),
             shell_integration_schema: shell.map(|_| SHELL_INTEGRATION_SCHEMA),
             shell_startup_files: Vec::new(),
@@ -47,6 +50,11 @@ impl Receipt {
         self.shell = shell.map(str::to_owned);
         self.shell_integration_schema = shell.map(|_| SHELL_INTEGRATION_SCHEMA);
         self.shell_startup_files = startup_files;
+    }
+
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.complete
     }
 
     fn validate(&self) -> Result<()> {
@@ -140,7 +148,11 @@ pub fn load(paths: &Paths) -> Result<Option<Receipt>> {
     };
     let receipt = parse_receipt(&path, &bytes)?;
     receipt.validate()?;
-    Ok(Some(receipt))
+    Ok(receipt.complete.then_some(receipt))
+}
+
+const fn setup_complete_default() -> bool {
+    true
 }
 
 pub fn load_for_setup(paths: &Paths) -> Result<(Option<Receipt>, Option<std::path::PathBuf>)> {
@@ -313,6 +325,20 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_checkpoint_is_recoverable_but_does_not_complete_setup() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = Paths::under(directory.path().to_path_buf());
+        let mut checkpoint = Receipt::new(Some("zsh"));
+        checkpoint.complete = false;
+        save(&paths, &checkpoint).unwrap();
+
+        assert_eq!(load(&paths).unwrap(), None);
+        let (recoverable, quarantined) = load_for_setup(&paths).unwrap();
+        assert_eq!(recoverable, Some(checkpoint));
+        assert_eq!(quarantined, None);
+    }
+
+    #[test]
     fn older_receipt_defaults_beta_consent_to_not_prompted() {
         let directory = tempfile::tempdir().unwrap();
         let paths = Paths::under(directory.path().to_path_buf());
@@ -323,6 +349,7 @@ mod tests {
         )
         .unwrap();
         let receipt = load(&paths).unwrap().unwrap();
+        assert!(receipt.complete);
         assert!(!receipt.failed_command_advisor_prompted);
     }
 
