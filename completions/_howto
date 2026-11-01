@@ -4,9 +4,9 @@ _howto() {
   local -a commands model_commands server_commands shell_commands config_commands config_keys
   commands=(
     'setup:download the model and configure HowTo'
-    'doctor:check the model and runtime'
+    'doctor:check setup, model, and provider readiness'
     'model:install or inspect the model'
-    'server:inspect or stop the local server'
+    'server:inspect or stop the embedded engine'
     'shell:manage shell integration'
     'config:read or change configuration'
     'help:show help'
@@ -14,11 +14,12 @@ _howto() {
   )
   model_commands=(
     'status:inspect the local model'
-    'install:download and verify the local model'
+    'list:compare model profiles'
+    'install:download, verify, and select a model profile'
   )
   server_commands=(
-    'status:inspect the resident model server'
-    'stop:stop the resident model server'
+    'status:inspect the resident embedded engine'
+    'stop:stop the resident embedded engine'
   )
   shell_commands=(
     'init:print a shell adapter'
@@ -34,13 +35,15 @@ _howto() {
     'unset:restore one setting to its default'
   )
   config_keys=(
+    'model_profile:selected catalog profile (read-only selection)'
     'model_path:local GGUF model path'
-    'llama_server_path:llama-server executable path'
+    'llama_server_path:deprecated local-runtime path'
     'server_url:completion provider URL'
     'threads:inference worker threads'
     'context_size:model context size'
     'max_tokens:maximum generated tokens'
-    'startup_timeout_seconds:managed-server startup deadline'
+    'startup_timeout_seconds:embedded-engine startup deadline'
+    'accelerator:embedded-engine accelerator (auto or cpu)'
     'show_tab_hint:show the post-query Tab reminder'
     'failed_command_advisor:enable beta local failure suggestions'
     'shell_path:execution shell path'
@@ -52,6 +55,7 @@ _howto() {
       setup)
         _arguments \
           '(-y --yes)'{-y,--yes}'[accept default-Yes setup prompts]' \
+          '--model[select a qualified model profile]:profile:(compact balanced accurate)' \
           '--no-shell[disable and omit Tab integration]' \
           '--shell[configure a specific shell]:shell:(zsh bash fish)' \
           '--help[show help]'
@@ -65,22 +69,27 @@ _howto() {
         if (( CURRENT == 3 )); then
           _values 'model command or option' \
             'status[inspect the local model]' \
-            'install[download and verify the local model]' \
+            'list[compare model profiles]' \
+            'install[download, verify, and select a model profile]' \
             '--json[emit JSON]' \
             '--deep[verify the model digest]' \
             '--help[show help]'
         elif [[ $words[3] == status ]]; then
           _values 'option' '--json[emit JSON]' '--deep[verify the model digest]'
+        elif [[ $words[3] == list ]]; then
+          _values 'option' '--json[emit JSON]'
         elif [[ $words[3] == install ]]; then
-          _values 'option' '-y[install without prompting]' '--yes[install without prompting]'
+          _arguments \
+            '(-y --yes)'{-y,--yes}'[install without prompting]' \
+            '1:profile:(compact balanced accurate)'
         fi
         return
         ;;
       server)
         if (( CURRENT == 3 )); then
           _values 'server command or option' \
-            'status[inspect the resident model server]' \
-            'stop[stop the resident model server]' \
+            'status[inspect the resident embedded engine]' \
+            'stop[stop the resident embedded engine]' \
             '--json[emit JSON]' \
             '--help[show help]'
         else
@@ -124,6 +133,8 @@ _howto() {
           && [[ $words[3] == set \
             && ( $words[4] == show_tab_hint || $words[4] == failed_command_advisor ) ]]; then
           _values 'boolean' true false
+        elif (( CURRENT == 5 )) && [[ $words[3] == set && $words[4] == accelerator ]]; then
+          _values 'accelerator' auto cpu
         fi
         return
         ;;

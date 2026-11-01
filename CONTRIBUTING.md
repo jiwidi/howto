@@ -20,20 +20,23 @@ project's [Apache License 2.0](LICENSE).
 
 ## Development setup
 
-The repository uses Rust 1.86, pinned in CI. On macOS:
+The repository uses Rust 1.86, pinned in CI. On macOS, first ensure the Xcode
+Command Line Tools are installed (`xcode-select --install` if needed), then:
 
 ```sh
-brew install rust llama.cpp shellcheck actionlint cargo-audit expect fish
+brew install rust cmake shellcheck actionlint cargo-audit expect fish
 git clone https://github.com/jiwidi/howto.git
 cd howto
 cargo build --locked
 cargo test --locked --all-targets --all-features
 ```
 
-Linux development is supported with Rust 1.86 and a `llama-server` installation
-available on `PATH` for real inference tests. Unit and integration tests do not
-download the model and do not need a running `llama-server`; integration tests
-use a local fake provider over a temporary Unix socket.
+Source builds need Rust 1.86, CMake, a C/C++ toolchain, and Clang/libclang for
+the generated llama.cpp bindings. On Debian/Ubuntu, install `build-essential`,
+`cmake`, `clang`, `libclang-dev`, and `pkg-config` in addition to the test tools
+below. Linux development is supported without a `llama-server` installation.
+Unit and integration tests do not download a model; configured-provider tests
+use a local fake endpoint over a temporary Unix socket.
 
 Run the complete local quality gate before submitting:
 
@@ -41,6 +44,8 @@ Run the complete local quality gate before submitting:
 cargo fmt --all --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
+cargo build --locked --bin howto
+scripts/verify-release-binary.sh target/debug/howto
 cargo audit --file Cargo.lock
 bash -n scripts/render-homebrew-formula.sh
 shellcheck scripts/render-homebrew-formula.sh completions/howto.bash shell/howto.bash
@@ -72,7 +77,8 @@ brew style Formula/howto.rb
 ```
 
 CI also checks RustSec advisories, formula rendering, deterministic archive
-creation, completion syntax, and the generated dependency-license bundle. It
+creation, completion syntax, the generated dependency-license bundle, and that
+release binaries do not require a separate llama/ggml shared library. It
 tests release builds on macOS arm64, macOS x86-64, Linux arm64, and Linux
 x86-64. A scheduled weekly scan catches newly published advisories even when
 the lockfile has not changed. Dependabot can propose Cargo and GitHub Actions
@@ -92,10 +98,10 @@ cargo run -- "show my current directory"
 Run `cargo run -- setup` before the first query. To isolate
 development state from your normal installation, set `HOWTO_HOME` to a short,
 absolute, private temporary directory before running the binary. Relative
-values are rejected. Keep it short because the managed runtime uses a Unix
+values are rejected. Keep it short because the embedded engine uses a Unix
 socket with an operating-system path limit.
 
-You can test the provider boundary with a local llama.cpp-compatible
+You can test the configured-provider boundary with a local llama.cpp-compatible
 OpenAI-style endpoint:
 
 ```sh
@@ -107,6 +113,19 @@ cargo run -- config unset server_url
 
 Do not use confidential prompts with a development or third-party endpoint.
 
+The ignored embedded-engine smoke test requires an explicit GGUF fixture and
+never fetches one. Keep large fixtures under an ignored directory and run:
+
+```sh
+HOWTO_TEST_GGUF=/absolute/path/model.gguf \
+  cargo test --locked embedded::tests::real_gguf_renders_and_generates -- --ignored --nocapture
+```
+
+Optionally set `HOWTO_TEST_LORA` to an already converted GGUF LoRA and
+`HOWTO_TEST_PROMPT_FORMAT=qwen35` for the Qwen3.5 no-thinking template. Never
+commit model weights or materialize every Git LFS object merely to run unit
+tests.
+
 ## Code expectations
 
 - Keep the crate free of `unsafe` Rust; `Cargo.toml` denies it.
@@ -116,9 +135,10 @@ Do not use confidential prompts with a development or third-party endpoint.
 - Do not execute by default, do not add non-interactive execution, and do not
   make `DANGER` or `UNKNOWN` executable.
 - Do not describe `NO_KNOWN_RISK` as safe. It means no current rule matched.
-- Keep local inference on an authenticated Unix socket without proxy routing.
-- Keep model artifacts immutable, pinned, resumable, and verified before
-  installation.
+- Keep local inference on the authenticated, framed engine Unix socket without
+  an HTTP/TCP listener or external executable lookup.
+- Keep model artifacts immutable, pinned, resumable, and verified as a complete
+  base/LoRA bundle before installation and profile selection.
 - Use atomic writes, owner-only state, symlink checks, and advisory locks for
   files that affect execution or server ownership.
 - Avoid logging prompts, generated commands, provider keys, or local bearer
@@ -152,7 +172,15 @@ fail-closed behavior when static analysis cannot establish enough structure.
 Changes to model prompts or decoding need a representative macOS and Linux
 evaluation, including polarity-sensitive and underspecified requests. A unit
 test that checks a prompt string is necessary but not evidence of model
-quality.
+quality. Do not reuse BF16 latency or accelerator-memory measurements from an
+RTX host as installed GGUF performance on macOS or Linux.
+
+Before making a catalog profile installable, require an immutable merged-GGUF
+release (or an exact base plus converted GGUF LoRA bundle), size and SHA-256 for
+every file, reproducible export provenance, prompt and stop-token verification,
+representative quality regression, Mac/Linux latency and resident-memory data,
+and explicit training-data/derivative redistribution clearance. A permissive
+base-model license alone is insufficient.
 
 ## Documentation and attribution
 
@@ -193,8 +221,9 @@ unreviewed generated command.
 
 Maintainers release by pushing a semantic version tag on a commit contained in
 protected `main`; the tag must exactly match `Cargo.toml`, for example
-`v0.1.0`. The release workflow reruns quality checks, builds four native
-targets, creates deterministic source and binary archives, publishes SHA-256
+`v0.2.0`. The release workflow reruns quality checks, builds four native
+targets with the native engine included, creates deterministic source and
+binary archives, publishes SHA-256
 checksums and build-provenance attestations, and verifies the generated formula
 with a strict Homebrew audit, install, and test on macOS and Linux. A failed
 Homebrew validation returns the release to draft. After successful checks, an

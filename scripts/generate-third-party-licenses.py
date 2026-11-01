@@ -28,6 +28,10 @@ LICENSE_NAME = re.compile(
 # the corresponding file from the published crate. These are pinned copies of
 # an allowed MIT notice from the exact upstream revision (or release tag).
 FALLBACK_LICENSES = {
+    (
+        "find_cuda_helper",
+        "0.2.0",
+    ): "rust-cuda-LICENSE-MIT.txt",  # Rust-GPU/Rust-CUDA root MIT notice
     ("jni", "0.22.4"): "jni-rs-LICENSE-MIT.txt",  # jni-rs/jni-rs@5ae9458a
     ("jni-macros", "0.22.4"): "jni-rs-LICENSE-MIT.txt",  # same workspace/revision
     ("jni-sys-macros", "0.4.1"): "jni-sys-LICENSE-MIT.txt",  # jni-sys@64d77b7a
@@ -35,6 +39,14 @@ FALLBACK_LICENSES = {
         "rustls-platform-verifier-android",
         "0.1.1",
     ): "rustls-platform-verifier-LICENSE-MIT.txt",  # tag v/0.1.1
+    (
+        "llama-cpp-2",
+        "0.1.154",
+    ): "llama-cpp-rs-LICENSE-MIT.txt",  # utilityai/llama-cpp-rs@bed81ad4
+    (
+        "llama-cpp-sys-2",
+        "0.1.154",
+    ): "llama-cpp-rs-LICENSE-MIT.txt",  # same workspace/revision
     ("tree-sitter", "0.25.10"): "tree-sitter-LICENSE-MIT.txt",  # @da6fe9be
     (
         "winapi-i686-pc-windows-gnu",
@@ -44,6 +56,19 @@ FALLBACK_LICENSES = {
         "winapi-x86_64-pc-windows-gnu",
         "0.4.0",
     ): "winapi-LICENSE-MIT.txt",  # same release
+    (
+        "valuable",
+        "0.1.1",
+    ): "valuable-LICENSE-MIT.txt",  # tokio-rs/valuable@9efc29b6
+}
+# llama-cpp-sys-2 vendors and statically compiles llama.cpp, but its crates.io
+# include list omits llama.cpp's root LICENSE. This notice is required in
+# addition to the wrapper crate's selectable MIT license.
+ADDITIONAL_LICENSES = {
+    (
+        "llama-cpp-sys-2",
+        "0.1.154",
+    ): ("llama.cpp-LICENSE-MIT.txt",),  # ggml-org/llama.cpp@5f55650a
 }
 
 
@@ -122,6 +147,12 @@ def license_files(package: dict[str, object]) -> list[Path]:
     if not selected and fallback:
         selected.add((ROOT / "scripts" / "license-fallbacks" / fallback).resolve())
 
+    additional = ADDITIONAL_LICENSES.get(
+        (str(package["name"]), str(package["version"])), ()
+    )
+    for filename in additional:
+        selected.add((ROOT / "scripts" / "license-fallbacks" / filename).resolve())
+
     if not selected:
         raise RuntimeError(
             f"no packaged license or notice file for "
@@ -191,8 +222,8 @@ def generate() -> str:
         )
 
     lines = [
-        "HowTo third-party Rust dependency licenses",
-        "============================================",
+        "HowTo third-party dependency licenses and notices",
+        "=================================================",
         "",
         "Generated deterministically from Cargo.lock by",
         "scripts/generate-third-party-licenses.py. Do not edit by hand.",

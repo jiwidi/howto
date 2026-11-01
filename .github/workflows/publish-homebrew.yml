@@ -101,10 +101,15 @@ jobs:
             git switch -c "$branch"
           fi
 
-          "$GITHUB_WORKSPACE/scripts/render-homebrew-formula.sh" \
+          # Always regenerate from current main rather than a stale automation
+          # branch. If this exact immutable source is already on main, preserve
+          # its bottle block instead of proposing a PR that removes bottles.
+          git restore --source=origin/main -- Formula/howto.rb
+          formula_path="$tap_path/Formula/howto.rb"
+          "$GITHUB_WORKSPACE/scripts/update-homebrew-formula.sh" \
             "$version" \
             "$source_sha256" \
-            "$tap_path/Formula/howto.rb"
+            "$formula_path"
 
           ruby -c Formula/howto.rb
           HOMEBREW_NO_AUTO_UPDATE=1 brew style Formula/howto.rb

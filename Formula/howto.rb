@@ -13,9 +13,16 @@ class Howto < Formula
 
   depends_on "cmake" => :build
   depends_on "rust" => :build
-  depends_on "llama.cpp"
+
+  on_linux do
+    # llama-cpp-sys generates bindings while compiling its vendored native
+    # runtime. macOS gets libclang from the required Xcode Command Line Tools.
+    depends_on "llvm" => :build
+  end
 
   def install
+    ENV["LIBCLANG_PATH"] = formula_opt_lib("llvm").to_s if OS.linux?
+    ENV["LLAMA_BUILD_SHARED_LIBS"] = "0"
     system "cargo", "install", *std_cargo_args
     doc.install "README.md", "CHANGELOG.md", "CONTRIBUTING.md", "PRIVACY.md", "SECURITY.md"
     doc.install "LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt", "docs"
@@ -31,7 +38,7 @@ class Howto < Formula
       shell_output("#{bin}/howto --version").strip,
     )
     assert_match "USAGE:", shell_output("#{bin}/howto --help")
-    assert_path_exists formula_opt_bin("llama.cpp")/"llama-server"
+    assert_predicate bin/"howto", :executable?
     %w[
       README.md CHANGELOG.md CONTRIBUTING.md PRIVACY.md SECURITY.md
       LICENSE NOTICE THIRD_PARTY_LICENSES.txt

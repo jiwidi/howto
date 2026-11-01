@@ -1,4 +1,4 @@
-.TH HOWTO 1 "August 13, 2026" "HowTo" "User Commands"
+.TH HOWTO 1 "August 15, 2026" "HowTo" "User Commands"
 .SH NAME
 howto \- turn plain English into a shell command locally
 .SH SYNOPSIS
@@ -12,14 +12,16 @@ howto \- turn plain English into a shell command locally
 .RI [ options ]
 .SH DESCRIPTION
 .B HowTo
-runs a local GGUF model through llama.cpp and prints one shell command suited to
-the current platform. It targets macOS with zsh and BSD tools first, and
-GNU/Linux with bash. Requests do not leave the machine when using the default
-provider.
+runs a local GGUF model through a llama.cpp engine compiled into the HowTo
+binary and prints one shell command suited to the current platform. It targets
+macOS with zsh and BSD tools first, and GNU/Linux with bash. Requests do not
+leave the machine when using the default provider. Local mode needs no Python,
+separate llama-server, local HTTP port, or Web UI.
 .PP
 Query generation requires the one-time
 .B howto setup
-workflow. Setup verifies the runtime, installs or reuses the model, and can
+workflow. Setup selects or preserves a profile, installs or reuses the model,
+and can
 configure context-aware Tab insertion for zsh, Bash, or fish. An interactive
 query offers to start missing setup. Non-interactive queries fail with an
 instruction instead of prompting or consuming request input.
@@ -39,7 +41,7 @@ prevent an eligible command from being offered at the next empty prompt.
 .PP
 The beta failed-command advisor is disabled by default. After a separate,
 default-No opt-in, a compatible interactive shell sends only the raw text and
-numeric exit status of a failed command to HowTo's managed local model. HowTo
+numeric exit status of a failed command to HowTo's embedded local model. HowTo
 prints the suggested replacement as untrusted text and never executes, copies,
 inserts, or stages it for Tab. The advisor captures no command output, current
 directory, environment, directory listing, or file content and keeps no failed-
@@ -104,9 +106,9 @@ Show help and exit.
 Show the HowTo version and exit.
 .SH COMMANDS
 .TP
-.B setup [-y|--yes] [--no-shell|--shell zsh|bash|fish]
-Perform or repair required onboarding. In local mode, resolve and probe
-llama-server before downloading, resuming, and verifying the pinned model.
+.B setup [-y|--yes] [--model compact|balanced|accurate] [--no-shell|--shell zsh|bash|fish]
+Perform or repair required onboarding. In local mode, select a published model
+profile before downloading, resuming, and verifying its pinned artifact bundle.
 Configured-provider mode skips the local model. By default, interactive setup
 asks whether to install the Tab integration. Use
 .B --yes
@@ -122,24 +124,31 @@ default answer of No. Neither
 nor non-interactive setup implies that consent.
 .TP
 .B doctor [--json] [--deep]
-Inspect setup, configuration, model, llama-server, and resident-server status.
+Inspect setup, configuration, model, and resident embedded-engine status.
 For a configured provider, try GET /health and then GET /v1/models, using the
 configured bearer token when present; this does not test chat completion. In
-local mode, require a successful, 30-second llama-server --version probe.
+local mode, report the runtime as embedded and do not load a model merely for
+the diagnostic.
 .TP
 .B model [status] [--json] [--deep]
 Inspect the installed model and optionally verify a managed or packaged copy
-of the default model against its pinned SHA-256 digest. Custom models have no
-built-in expected digest.
+of the selected published catalog model against its pinned SHA-256 digest.
+Custom models have no built-in expected digest.
 .TP
-.B model install [-y|--yes]
-Download, resume, verify, and atomically install the pinned local model.
+.B model list [--json]
+Compare Compact, Balanced, and Accurate catalog metadata and publication state.
+.TP
+.B model install [compact|balanced|accurate] [-y|--yes]
+Download, resume, verify, atomically install, and select a published profile.
+An unpublished profile fails before network access.
 .TP
 .B server [status] [--json]
-Show resident llama-server status.
+Show resident embedded-engine status and any detected pre-upgrade
+llama-server.
 .TP
 .B server stop [--json]
-Stop only the llama-server process recorded and validated as HowTo's.
+Stop only the embedded worker process recorded and validated as HowTo's. Also
+clean up a recorded legacy llama-server when present.
 .TP
 .B shell status [--json]
 Show whether shell integration is persistently configured and active in the
@@ -176,18 +185,67 @@ Show help and exit.
 .TP
 .B version
 Show the HowTo version and exit.
+.SH MODEL PROFILES
+Schema-1 upgrades retain the published
+.B legacy
+nl2sh 1.5B model and its old flat model path, avoiding another download.
+When qualified entries are available, new interactive setup recommends
+.BR balanced ;
+.B --yes
+selects that recommendation, and an existing installation can change profiles
+with
+.BR "model install PROFILE" .
+.PP
+The catalog currently describes three tuned research candidates:
+.TP
+.B compact
+Qwen2.5-Coder 0.5B; 63.75 percent executable pass@1; 469 MiB reference disk;
+86.4 ms research BF16 mean latency; 1.14 GB research accelerator peak;
+provisional 1.5 GiB host-RAM guidance.
+.TP
+.B balanced
+Qwen3.5 0.8B; 67.75 percent executable pass@1; 537 MiB reference disk;
+180.0 ms research BF16 mean latency; 1.62 GB research accelerator peak;
+provisional 2 GiB host-RAM guidance.
+.TP
+.B accurate
+Qwen3.5 2B; 74.50 percent executable pass@1; 1332 MiB reference disk;
+181.8 ms research BF16 mean latency; 3.96 GB research accelerator peak;
+provisional 4 GiB host-RAM guidance.
+.PP
+Quality is from one 400-task held-out Linux/bash fold. Latency and peak memory
+were measured in BF16 on an NVIDIA RTX 5090, not with final GGUFs on a Mac or
+representative Linux host. All three profiles are currently unpublished and
+not installable. Their Apache-2.0 base licenses do not by themselves clear the
+tuned derivatives for distribution. The catalog activates a profile only after
+redistribution clearance and immutable merged-GGUF URL, size, SHA-256,
+prompt/stop, quality, Mac/Linux performance, and memory qualification.
 .SH CONFIGURATION
-Configuration uses schema 1 and rejects schema 0, future schemas, and unknown
-keys. Stored model, llama-server, and shell paths must be absolute. The
+Configuration uses schema 2. Schema 1 is migrated with
+.BR model_profile=legacy ;
+schema 0, future schemas, and unknown keys are rejected. Select
+.B model_profile
+through setup or model install so verification precedes selection. Stored model
+and shell paths must be absolute. The deprecated
+.B llama_server_path
+field is still parsed for migration but ignored by local inference. The
 generation limit must be smaller than the configured context size. HTTP(S)
 provider URLs may include a base path but cannot include credentials, a query,
 or a fragment; Unix-socket provider paths must be absolute.
+.PP
+.B accelerator
+accepts
+.B auto
+or
+.BR cpu ,
+defaults to auto, and can force the portable CPU path when native GPU or Metal
+initialization is unavailable.
 .PP
 .B show_tab_hint
 accepts true or false and defaults to true.
 .B failed_command_advisor
 also accepts true or false, defaults to false, and is effective only with
-compatible shell integration and the managed local provider. It cannot be true
+compatible shell integration and the embedded local provider. It cannot be true
 while
 .B server_url
 is configured.
@@ -204,7 +262,8 @@ Use a specific GGUF model file.
 Add a package-provided default-model candidate.
 .TP
 .B HOWTO_LLAMA_SERVER
-Use a specific llama-server executable.
+Deprecated and ignored by local inference. Retained so an old environment
+cannot redirect the embedded engine during migration.
 .TP
 .B HOWTO_API_KEY
 Bearer token for a configured external provider. It is removed from the
@@ -232,14 +291,22 @@ macOS configuration, setup receipt, models, and shell adapter.
 Linux configuration, setup receipt, models, and shell adapter.
 .TP
 .I $XDG_RUNTIME_DIR/howto or $TMPDIR/howto-UID
-Private server state and one-shot, session-scoped pending commands.
+Private embedded-engine state and one-shot, session-scoped pending commands.
+.TP
+.I ~/Library/Logs/HowTo/engine.log
+macOS embedded-engine log.
+.TP
+.I ~/.local/state/howto/log/engine.log
+Default Linux embedded-engine log; XDG_STATE_HOME can change its parent.
 .SH EXAMPLES
 .nf
 howto setup
+howto model list
 howto "free port 8080"
 howto find files larger than 1GB
 howto -x show my current IP address
 howto doctor --deep
+howto server status
 howto shell status
 howto config set failed_command_advisor true
 .fi
@@ -258,7 +325,7 @@ indicates invalid command-line usage.
 indicates a configuration, dependency, or model error.
 .TP
 .B 4
-indicates a server, network, or model-response error.
+indicates an embedded-engine, network, or model-response error.
 .SH SEE ALSO
 .BR zsh (1),
 .BR bash (1),

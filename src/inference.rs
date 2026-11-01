@@ -1,13 +1,18 @@
 use std::io::Read;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
+use crate::engine_protocol::{
+    ChatMessage as EngineMessage, ChatRole as EngineRole, FinishReason as EngineFinishReason,
+    GenerateRequest,
+};
+use crate::engine_runtime::Connection as EngineConnection;
 use crate::error::{Error, Result};
 use crate::extract;
 use crate::platform::Platform;
-use crate::runtime::Connection;
+use crate::runtime::Connection as HttpConnection;
 
 const MAX_RESPONSE_BYTES: u64 = 16 * 1_024 * 1_024;
 const MAX_SERVER_ERROR_BYTES: usize = 2_048;
@@ -22,14 +27,60 @@ pub struct Generation {
 }
 
 pub struct Generator<'a> {
-    connection: &'a Connection,
+    connection: &'a ProviderConnection,
     config: &'a Config,
     platform: Platform,
 }
 
+/// The two deliberately separate provider boundaries supported by HowTo.
+///
+/// A local connection speaks the private framed engine protocol and carries
+/// model-specific token stops. A configured connection keeps the existing
+/// OpenAI-compatible HTTP contract. Keeping the variants explicit prevents
+/// privacy-sensitive callers such as the failed-command advisor from treating
+/// a remote URL as if it were the managed local engine.
+#[derive(Clone)]
+pub enum ProviderConnection {
+    Embedded {
+        connection: EngineConnection,
+        stop_strings: Vec<String>,
+        stop_token_ids: Vec<i32>,
+    },
+    Configured(HttpConnection),
+}
+
+impl ProviderConnection {
+    #[must_use]
+    pub fn embedded(
+        connection: EngineConnection,
+        stop_strings: &[&str],
+        stop_token_ids: &[i32],
+    ) -> Self {
+        Self::Embedded {
+            connection,
+            stop_strings: stop_strings.iter().map(|stop| (*stop).to_owned()).collect(),
+            stop_token_ids: stop_token_ids.to_vec(),
+        }
+    }
+
+    #[must_use]
+    pub const fn configured(connection: HttpConnection) -> Self {
+        Self::Configured(connection)
+    }
+
+    #[must_use]
+    pub const fn is_local(&self) -> bool {
+        matches!(self, Self::Embedded { .. })
+    }
+}
+
 impl<'a> Generator<'a> {
     #[must_use]
-    pub const fn new(connection: &'a Connection, config: &'a Config, platform: Platform) -> Self {
+    pub const fn new(
+        connection: &'a ProviderConnection,
+        config: &'a Config,
+        platform: Platform,
+    ) -> Self {
         Self {
             connection,
             config,
@@ -153,15 +204,76 @@ impl<'a> Generator<'a> {
             stop: &STOP,
             stream: false,
         };
-        let response = self
-            .connection
-            .post("v1/chat/completions")
-            .timeout(timeout)
-            .json(&body)
-            .send()
-            .map_err(|error| Error::Network(format!("inference request failed: {error}")))?;
-        decode_response(response)
+        match self.connection {
+            ProviderConnection::Embedded {
+                connection,
+                stop_strings,
+                stop_token_ids,
+            } => {
+                let timeout_ms = u64::try_from(timeout.as_millis())
+                    .unwrap_or(u64::MAX)
+                    .max(1);
+                let expires_at_unix_ms = unix_millis().saturating_add(timeout_ms);
+                let generated = connection.generate(
+                    GenerateRequest {
+                        messages: vec![
+                            EngineMessage {
+                                role: EngineRole::System,
+                                content: system_prompt.to_owned(),
+                            },
+                            EngineMessage {
+                                role: EngineRole::User,
+                                content: prompt.to_owned(),
+                            },
+                        ],
+                        max_tokens: self.config.max_tokens,
+                        temperature,
+                        top_p: (temperature > 0.0).then_some(0.95),
+                        repeat_penalty: 1.08,
+                        repeat_last_n: 64,
+                        seed: if temperature > 0.0 {
+                            rand::random::<u32>()
+                        } else {
+                            0
+                        },
+                        stop: stop_strings.clone(),
+                        stop_token_ids: stop_token_ids.clone(),
+                        expires_at_unix_ms: Some(expires_at_unix_ms),
+                    },
+                    timeout,
+                )?;
+                Ok(vec![ExtractedChoice {
+                    content: generated.content,
+                    finish_reason: Some(
+                        match generated.finish_reason {
+                            EngineFinishReason::Stop => "stop",
+                            EngineFinishReason::Length => "length",
+                        }
+                        .into(),
+                    ),
+                }])
+            }
+            ProviderConnection::Configured(connection) => {
+                let response = connection
+                    .post("v1/chat/completions")
+                    .timeout(timeout)
+                    .json(&body)
+                    .send()
+                    .map_err(|error| {
+                        Error::Network(format!("inference request failed: {error}"))
+                    })?;
+                decode_response(response)
+            }
+        }
     }
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or_default()
 }
 
 fn failed_command_payload(command: &str, status: u16) -> String {

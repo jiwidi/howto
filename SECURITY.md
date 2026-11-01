@@ -31,7 +31,7 @@ HowTo treats these inputs as untrusted:
 
 1. the natural-language request or failed-command text;
 2. output from the model or a configured provider;
-3. downloaded model and runtime artifacts; and
+3. downloaded model artifacts and the native inference implementation; and
 4. local configuration and runtime state that may have been tampered with.
 
 The default path applies the following controls:
@@ -44,15 +44,15 @@ The default path applies the following controls:
   session, and inserts it only into an empty editable buffer without submitting;
 - the beta failed-command advisor is disabled by default and requires a separate,
   default-No interactive opt-in that `--yes` does not imply. It sends only raw
-  command text and exit status to the managed local model, is unavailable when
+  command text and exit status to the embedded local model, is unavailable when
   `server_url` is configured, and prints suggestions without executing, copying,
   inserting, or staging them;
 - advisor eligibility is limited to one short, literal external command with a
   non-signal failure status. Compound syntax, expansions, wrappers, builtins,
   control characters, leading whitespace, and secret-like text are rejected
   before inference;
-- the shell adapter pins HowTo's executable, session, state paths, model and
-  managed-runtime selection when it loads, and uses a clean bounded environment
+- the shell adapter pins HowTo's executable, session, state paths, and model
+  selection when it loads, and uses a clean bounded environment
   for automatic calls so later project-local environment changes cannot
   redirect failed-command text or pending Tab state;
 - `--quiet` emits only a `NO_KNOWN_RISK` result;
@@ -63,18 +63,22 @@ The default path applies the following controls:
   and known high-impact operations;
 - queries, diagnostics, and model, server, or config operations refuse root,
   set-user-ID-style elevation, and `sudo howto ...`;
-- the managed model artifact is pinned by immutable URL, exact byte count, and
-  SHA-256, and is moved into place only after verification;
+- each published catalog bundle is pinned by immutable URL, exact byte count,
+  and SHA-256, and is moved into place only after every file is verified;
+- unpublished model profiles fail before network access; research benchmark
+  metadata, a permissive base-model license, or a mutable URL cannot bypass the
+  explicit derivative-distribution and Mac/Linux qualification gates;
 - downloads are resumable, range-checked, space-checked, locked, and protected
   against writing through symlinks;
 - local directories are owner-only, and config, lock, state, key, and log
   files are created with restrictive permissions and symlink checks;
-- the managed server uses an authenticated Unix socket, disables proxy use for
-  local requests, and starts `llama-server` with `--offline` and `--no-webui`;
+- the embedded engine uses an owner-only authenticated Unix socket and a
+  size-bounded, versioned protocol; local inference opens no TCP/HTTP listener,
+  has no Web UI, and does not resolve a separate executable;
 - concurrent starts are serialized, state is fingerprinted to the HowTo
-  version, managed-launch policy schema, model, runtime, and relevant settings,
-  and a PID is signaled only after its command line matches the recorded model,
-  server, and Unix-socket path; and
+  executable/version, launch policy, model and optional LoRA, prompt profile,
+  and relevant settings, and a PID is signaled only after its private worker
+  identity and launch manifest match recorded state; and
 - provider responses are size-limited and must match the expected
   OpenAI-compatible response shape; provider-supplied API error text is capped
   at 2048 bytes and control or bidirectional-format characters are escaped
@@ -156,7 +160,7 @@ statuses are therefore not sent to that endpoint.
   put it in `server_url`, the JSON configuration, issue reports, or shell
   transcripts.
 - A configured custom GGUF is checked only for a plausible file shape, not
-  against HowTo's default-model digest. Its provenance is the operator's
+  against a HowTo catalog digest. Its provenance is the operator's
   responsibility.
 
 In configured-provider mode, `howto doctor` sends `GET /health` and, if needed,
@@ -178,8 +182,8 @@ the immutable source URL, then audits and installs the generated versioned
 formula on macOS and Linux. A failed or cancelled Homebrew validation returns
 the release to draft automatically. When opt-in tap publishing is enabled, a
 stable update is proposed only for non-prerelease tags and only after those
-checks. The managed model has a separate pinned digest that can be checked
-with:
+checks. Each published managed model has a separate pinned digest that can be
+checked with:
 
 ```sh
 howto model status --deep
@@ -192,9 +196,11 @@ notarized; prefer the Homebrew source install unless you independently review
 and trust a standalone archive. Checksums and provenance attestations establish
 artifact identity and build origin, not Apple notarization or runtime safety.
 
-Homebrew supplies `llama.cpp` as a separate dependency. Its formula, binaries,
-updates, and native model-loading attack surface are outside HowTo's static
-safety parser. Keep Homebrew, `llama.cpp`, and HowTo current.
+The installed HowTo binary contains its locked llama.cpp runtime. This removes
+a separately updated executable and local HTTP surface, but native model
+parsing remains outside HowTo's static command-safety parser. Treat arbitrary
+GGUF/LoRA files as untrusted native-parser input, prefer catalog-pinned models,
+and keep HowTo current.
 
 ## Safer operating practices
 

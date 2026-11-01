@@ -13,11 +13,15 @@ request
   ▼
 CLI parser ──► setup receipt gate ──► platform prompt + config
   │
-  ├── local provider: model resolver ─► managed llama-server ─┐
-  │                                                          │
-  └── configured provider: HTTP(S) or Unix socket ───────────┤
-                                                             ▼
-                                                   chat completion
+  ├── local: catalog/model resolver ─► same-binary worker ────┐
+  │                                      │                    │
+  │                           private framed Unix IPC          │
+  │                                      │                    │
+  │                              embedded llama.cpp            │
+  │                                                           │
+  └── configured: OpenAI-style HTTP(S) or Unix socket ────────┤
+                                                              ▼
+                                                     generated text
                                                              │
                                                              ▼
                      output-shape validation ◄── strict retry once
@@ -47,8 +51,12 @@ passes the checker.
 | `src/setup.rs` | Versioned setup receipt, setup serialization lock, atomic writes, and incomplete-state detection. |
 | `src/shell.rs` | zsh/Bash/fish adapter installation, startup-file management, private pending-command transfer, and failed-command advisor dispatch. |
 | `src/paths.rs` | macOS-native, Linux XDG, runtime, and `HOWTO_HOME` paths with owner-only directories. |
-| `src/model.rs` | Model manifest, resolution precedence, resumable download, disk-space and range checks, locking, SHA-256 verification, and atomic install. |
-| `src/runtime.rs` | `llama-server` resolution, local process lifecycle, Unix-socket HTTP client, authentication, state identity, health, logs, and configured connections. |
+| `src/model_catalog.rs` | Stable profile names, prompt/stop contracts, benchmark metadata, license gates, and immutable publication records. |
+| `src/model.rs` | Catalog-bundle resolution, legacy-layout migration, resumable download, disk-space and range checks, locking, SHA-256 verification, and atomic install. |
+| `src/embedded.rs` | Safe Rust wrapper around the linked llama.cpp engine, model/LoRA loading, prompt evaluation, sampling, and bounded generation. |
+| `src/engine_protocol.rs` | Versioned, length-framed local request/response protocol with size and field validation. |
+| `src/engine_runtime.rs` | Same-binary worker lifecycle, private Unix IPC, authentication, state identity, health, bounded shutdown, and engine logs. |
+| `src/runtime.rs` | OpenAI-compatible configured-provider client and migration-only cleanup of the former managed `llama-server`. |
 | `src/platform.rs` | macOS/zsh/BSD and Linux/bash/GNU generation contracts. |
 | `src/inference.rs` | OpenAI-style request construction, deterministic first choice, sampled alternatives, response limits, and decoding. |
 | `src/extract.rs` | Removal of permitted wrappers and rejection of multiline, control-byte, malformed, oversized, empty, or truncated output. |
@@ -96,15 +104,30 @@ setup workflow; JSON, quiet, piped, and other non-interactive requests fail
 before consuming request input. Help, version, setup, doctor, model, server,
 shell, and config operations remain available for repair.
 
-Setup is serialized with a private lock. After the runtime/model phase and
+Setup is serialized with a private lock. After the model phase and
 optional shell phase finish, it writes a recoverable receipt checkpoint before
 asking for the independent beta-advisor preference. This keeps startup files
 and setup state consistent if the user interrupts that final prompt; rerunning
-setup offers the unanswered prompt again. Local setup resolves `llama-server`
-before a potentially large download, verifies an existing managed artifact,
+setup offers the unanswered prompt again. Local setup needs no external runtime
+probe: it selects a catalog profile, verifies an existing managed artifact,
 and otherwise uses the resumable installer. A configured provider skips local
-runtime and model acquisition. Repeated setup repairs the same integration
-without adding duplicate startup blocks.
+model acquisition. Repeated setup repairs the same integration without adding
+duplicate startup blocks.
+
+Configuration schema 2 adds the stable `model_profile` enum. A schema-1
+configuration is migrated in memory to `legacy`, and a setup that already has a
+receipt keeps its current selection. This avoids redownloading or silently
+changing output after an upgrade. When qualified choices exist, first setup
+offers `compact`, `balanced`, and `accurate`, recommends `balanced`, and accepts
+the same values through `setup --model`. `--yes` selects the recommended
+installable profile. Selection is committed only after the complete artifact
+bundle is verified; other installed profiles are retained.
+
+At present all three new tuned profiles are marked unpublished. Setup therefore
+prints the qualification gate and selects the published legacy artifact. An
+explicit request for an unpublished profile fails before any network request.
+This is intentional: the catalog cannot turn research metadata or a mutable
+model URL into a release artifact.
 
 After compatible shell integration is successfully configured, interactive
 setup can offer the beta failed-command advisor through a separate default-No
@@ -157,17 +180,17 @@ text and numeric exit status to the application; a disabled preference causes
 no failed-command data transfer or inference. The application rechecks consent
 before reading the piped command. At activation, the adapter pins the absolute
 HowTo executable, session identifier, and environment values that select its
-state, model, and managed runtime. Every automatic call runs with that bounded
+state and model selection. Every automatic call runs with that bounded
 environment, so a later project-local `PATH`, `HOWTO_HOME`, XDG, model, or
-runtime override cannot redirect captured text or pending Tab state. Config
+deprecated runtime override cannot redirect captured text or pending Tab state. Config
 files under the bound state root remain live. The adapter does not capture
 command output, current directory, environment, directory listings, or file
 contents. Configuration validation makes
 `failed_command_advisor=true` and a non-null `server_url` mutually exclusive,
 and the application checks the preference again before starting inference.
-Eligible input is sent only to the managed `llama-server` over its authenticated
-private Unix socket. Runtime acquisition is nonblocking when another operation
-holds the server lock, and acquisition plus inference share a 20-second
+Eligible input is sent only to the embedded engine over its authenticated
+private Unix socket. Engine acquisition is nonblocking when another operation
+holds the lifecycle lock, and acquisition plus inference share a 20-second
 deadline. The resulting suggestion is printed as untrusted text; it
 is never executed, copied, placed in the line editor, or published as pending
 Tab state. HowTo does not persist failed-command or advisor history.
@@ -181,9 +204,16 @@ executable is eligible only with the standard command-not-found status 127;
 otherwise the executable must resolve through `PATH`. This heuristic reduces
 disclosure but cannot prove that a command contains no sensitive value.
 
-## Model boundary
+## Model catalog and artifact boundary
 
-The built-in manifest fixes:
+Every built-in catalog entry fixes a stable profile name, artifact ID, base
+repository and revision, prompt format, stop strings/token IDs, license facts,
+benchmark provenance, and publication state. A published artifact set also
+requires immutable URLs, exact byte counts, and SHA-256 digests for the base
+GGUF and optional LoRA. A profile is not installable unless all those fields are
+present and its distribution gate is approved.
+
+The published `legacy` entry fixes:
 
 - model ID `nl2sh-1.5b-q4-k-m`;
 - display artifact `nl2sh-1.5b-Q4_K_M.gguf`;
@@ -194,97 +224,121 @@ The built-in manifest fixes:
   and
 - declared license `Apache-2.0`.
 
-Resolution precedence is:
+The research-only entries are:
+
+| Profile | Base | Executable pass@1 | Reference disk | Research BF16 mean latency | Research BF16 peak |
+|---|---|---:|---:|---:|---:|
+| `compact` | Qwen2.5-Coder 0.5B | 255/400 (63.75%) | 491400064 bytes | 86.4 ms | 1.14 GB |
+| `balanced` | Qwen3.5 0.8B | 271/400 (67.75%) | 563036064 bytes | 180.0 ms | 1.62 GB |
+| `accurate` | Qwen3.5 2B | 298/400 (74.50%) | 1396198496 bytes | 181.8 ms | 3.96 GB |
+
+Quality is from one held-out Linux/bash fold. Latency and peak memory were
+measured in BF16 on an NVIDIA RTX 5090, not with the release GGUF runtime on a
+Mac or representative Linux hosts. The base models are Apache-2.0, but the
+tuned-derivative training-data/redistribution review is incomplete. Consequently
+these entries contain no downloadable artifact. Publication requires legal
+clearance plus reproducible merged-GGUF export, exact immutable metadata,
+prompt/stop-token verification, quality regression testing, and Mac/Linux
+latency and resident-memory qualification.
+
+`model list` reports catalog facts and the unavailability reason.
+`setup --model PROFILE` and `model install PROFILE` use only published entries
+and fail closed otherwise. `model_profile` is not set directly through
+`config set`: installation and verification own the selection transaction.
+
+Local resolution precedence is:
 
 1. `HOWTO_MODEL`;
 2. configured `model_path`;
 3. `HOWTO_PACKAGED_MODEL`;
-4. model files under known installation prefixes;
-5. the managed data directory.
+4. a complete bundle for the selected profile under known installation
+   prefixes; and
+5. that profile's directory in the managed data directory.
 
 Configured models are required to be regular `.gguf` files larger than 1 MiB.
-Their digest is not known to HowTo. Packaged and managed default candidates
-must also be regular, non-symlink files matching the built-in byte length
-during fast resolution.
+Their digest is not known to HowTo. Published catalog bundles require every
+base/LoRA file, use profile-scoped `models/<artifact-id>/` directories, and
+must contain regular, non-symlink files matching the built-in lengths during
+fast resolution. The old flat `models/nl2sh-1.5b-Q4_K_M.gguf` path remains a
+legacy-only candidate so an upgrade does not redownload 940 MiB.
 
 The installer serializes concurrent downloads with an advisory lock, reserves
 128 MiB beyond the remaining artifact bytes, and resumes only when the status
 and `Content-Range` exactly match the pinned artifact. An invalid range or HTTP
 416 discards the partial for a clean next-run restart, and a chunk that would
-exceed the expected size is rejected before it is written. The installer writes
-through an `O_NOFOLLOW` partial file, syncs it, verifies the final length and
-digest, then renames it into place. A failed digest is removed.
+exceed the expected size is rejected before it is written. It writes through
+`O_NOFOLLOW` partial files in a hidden profile staging directory, syncs them,
+verifies the complete bundle's lengths and digests, then publishes the profile
+directory atomically. A failed digest is removed. Switching a profile does not
+delete already installed profiles.
 
-Normal resolution intentionally does not rehash a one-gigabyte artifact.
-`howto model status --deep` is the explicit integrity check. The download revision
-used in source and the later audited model-repository revision contain the same
-filename, size, and verified digest; details are in
-[ATTRIBUTION.md](ATTRIBUTION.md).
+Normal resolution intentionally does not rehash a large artifact.
+`howto model status --deep` is the explicit integrity check. Legacy provenance
+details are in [ATTRIBUTION.md](ATTRIBUTION.md).
 
-## Local runtime boundary
+## Embedded engine boundary
 
-`llama-server` resolution precedence is:
+The foreground CLI and resident engine are two invocations of the same
+executable. The manager re-executes the current canonical `howto` binary with a
+private, undocumented worker argument; normal CLI parsing never exposes an
+engine command. The worker links llama.cpp through the Rust crate and loads the
+selected base GGUF plus an optional catalog-pinned LoRA. No subprocess binary,
+TCP listener, HTTP stack, proxy path, or Web UI exists in local inference mode.
 
-1. `HOWTO_LLAMA_SERVER`;
-2. configured `llama_server_path`;
-3. `PATH`; and
-4. known Homebrew and system locations.
-
-The local manager refuses elevated execution and creates the runtime layout
-before taking an exclusive startup lock. A server fingerprint covers the
-HowTo version, a managed-launch policy schema, canonical model path, model
-byte length and modification time, canonical runtime path, thread count,
-context size, token limit, and model alias. Changing a fixed launch flag or
-managed-server environment policy requires incrementing that policy schema.
+The manager refuses elevated execution and creates the runtime layout before
+taking an exclusive lifecycle lock. An engine fingerprint covers the HowTo
+version and policy schema, executable/model/LoRA paths and file identity,
+prompt format, context/batch/thread/GPU/mmap settings, token limit, and model
+alias. Changing any of these starts a new worker rather than reusing stale
+model state.
 
 An existing process is reused only when:
 
 - state schema, fingerprint, and socket path match;
 - the recorded PID is alive;
-- its process command includes the recorded server, model, and socket path; and
-- authenticated `/health` succeeds over the expected Unix socket.
+- its process command includes the private worker identity and launch manifest;
+  and
+- an authenticated protocol `Health` request succeeds over the expected Unix
+  socket.
 
 Ensure and status operations share the same lifecycle lock, and reuse gives a
-recently waking idle server up to three health attempts before replacement.
-
+recently waking idle engine up to three health attempts before replacement.
 Otherwise the manager stops only a process that still matches its recorded
 identity, clears stale socket/key/state files, and starts a replacement.
 Startup failure kills and waits for the child, clears state, and includes a
-bounded, terminal-safe runtime-log tail in the error. A missing process during SIGTERM or the
-SIGKILL fallback is treated as already stopped.
+bounded, terminal-safe engine-log tail in the error. A missing process during
+SIGTERM or the SIGKILL fallback is treated as already stopped.
 
 Malformed state JSON is not trusted or silently overwritten. Under the
-lifecycle lock it is renamed to a timestamped `server.json.corrupt-*` file,
+lifecycle lock it is renamed to a timestamped `engine.json.corrupt-*` file,
 related live-state files are cleaned, and a warning identifies the quarantined
 file before recovery continues.
 
-The managed process receives:
+The launch manifest and random authorization key are owner-only. Requests use a
+versioned, length-prefixed JSON protocol with a 64 KiB frame cap and validated
+message, generation, stop-token, and deadline fields. The worker accepts one
+request per Unix connection, enforces an absolute generation ceiling, and
+exits after 900 seconds idle. Its environment is cleared and rebuilt from a
+small locale, temporary-directory, home, and accelerator-selection allowlist;
+proxy, caller credential, dynamic-loader, and language-runtime injection
+variables are not inherited. Logs rotate to one backup after 2 MiB and are
+sanitized and bounded before excerpts reach the terminal.
 
-```text
---host <private Unix socket>
---parallel 1
---api-key-file <owner-only random key>
---offline
---no-webui
---sleep-idle-seconds 900
-```
+`server status` is retained as the stable user command but labels the process
+an embedded engine. `server stop` verifies recorded ownership before signaling
+it. Both commands also detect and safely clean up state from the former
+HowTo-managed `llama-server`, preventing an upgrade from leaving that process
+resident. `llama_server_path` and `HOWTO_LLAMA_SERVER` remain deprecated
+schema/environment compatibility inputs and are ignored for new local
+inference.
 
-It also receives the configured model, context, thread, alias, and prediction
-limits. Its environment is cleared and rebuilt from a small locale, temporary
-directory, home, and GPU-selection allowlist; `LLAMA_ARG_*`, proxy, and caller
-credential variables are not inherited. The client disables proxies for this
-socket. State and key files are owner-only; logs rotate to one backup when they
-exceed 2 MiB.
-
-Local `doctor` requires the resolved executable to be named `llama-server` and
-runs its `--version` mode in the same allowlisted environment with a
-ten-second deadline. Local readiness means the model exists, that probe
-succeeds, and an optional deep digest check did not fail; it is not a full
-inference request.
+Local `doctor` requires the selected model and optionally its catalog digest;
+it reports the runtime as embedded and does not load the model or probe an
+external executable. A query is the end-to-end load and inference check.
 
 ## Configured provider boundary
 
-When `server_url` is present, model resolution and managed-runtime startup are
+When `server_url` is present, model resolution and embedded-engine startup are
 skipped. `runtime::Connection` supports:
 
 - `https://` and `http://` base URLs; and
@@ -319,12 +373,13 @@ platform. The first completion uses temperature 0.0. If extraction fails, one
 strict retry asks for a corrected command. Additional candidates, when
 requested, use temperature 0.6 and top-p 0.95; invalid or duplicate sampled
 choices are ignored without discarding the first valid result. Every attempt
-is a separate request with `n: 1`, matching llama-server's single-choice
-behavior.
+is a separate request with one choice.
 
-Requests are non-streaming and include newline, `<|im_end|>`, and Markdown
-fence stop sequences, a repeat penalty, and the configured token cap. The HTTP
-request has a 180-second deadline.
+The catalog selects exact prompt rendering and string/token stops. Qwen3.5 uses
+a no-thinking assistant prefill so the first newline stop cannot expose or
+truncate an opening reasoning tag. Requests include the configured sampling,
+repeat, and token limits. Embedded generation is bounded to 300 seconds; a
+configured provider request has its own 180-second HTTP deadline.
 
 Extraction removes a complete `<think>` region, one recognized shell fence,
 known prose preambles, a prompt glyph, or one pair of inline backticks. It
@@ -376,16 +431,20 @@ not a sandbox, semantic validator, or capability boundary. See
 
 ## Configuration and paths
 
-The versioned JSON configuration uses schema 1, rejects schema 0, future
+The versioned JSON configuration uses schema 2, rejects schema 0, future
 schemas, and unknown keys, fills other missing keys from current defaults,
 validates ranges, refuses a symlinked file, and replaces it atomically after
-syncing both file and parent directory.
-`max_tokens` must be strictly smaller than `context_size`. Stored model,
-runtime, and shell paths must be absolute. The `show_tab_hint` boolean is a
+syncing both file and parent directory. Schema 1 is migrated to schema 2 with
+`model_profile=legacy`, preserving all existing settings.
+`max_tokens` must be strictly smaller than `context_size`. Stored model and
+shell paths must be absolute; the deprecated `llama_server_path` is still
+validated when present but ignored locally. `accelerator=auto|cpu` selects
+native offload or a portable CPU fallback and is part of the resident-engine
+fingerprint. The `show_tab_hint` boolean is a
 presentation preference: disabling it suppresses only the post-query reminder,
 not pending-command publication or Tab insertion. The
 `failed_command_advisor` boolean defaults to false and is an explicit opt-in;
-it has no effect without compatible shell integration and the managed local
+it has no effect without compatible shell integration and the embedded local
 provider.
 
 macOS follows native Application Support, Caches, and Logs locations. Linux
@@ -402,10 +461,11 @@ exact locations and retention.
 ## Packaging and release
 
 The repository formula is the source template for stable tap releases and
-optional HEAD builds. It builds and installs the Rust binary from source,
-depends on Homebrew's `llama.cpp`, and installs the `howto` manual page and
-shell completions plus the project documentation, notices, and locked Rust
-dependency-license bundle.
+optional HEAD builds. It compiles llama.cpp into the Rust binary (source builds
+therefore need Rust 1.86, CMake, a C/C++ toolchain, and Clang/libclang for
+bindings) and installs the `howto` manual page and shell completions plus the
+project documentation, notices, and locked dependency-license bundle. The
+installed runtime has no separate llama.cpp package dependency or service.
 Release automation renders a versioned formula with the immutable source-archive
 URL and SHA-256.
 
@@ -430,7 +490,7 @@ Errors are grouped for automation:
 - 1: execution, I/O, or JSON;
 - 2: usage;
 - 3: configuration, dependency, or model; and
-- 4: runtime server, network, provider response, or invalid model output.
+- 4: embedded engine, network, provider response, or invalid model output.
 
 An explicitly executed command returns its own exit status. Negative status
 commands such as a missing model may return 1 without an internal error.

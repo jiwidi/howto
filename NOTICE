@@ -36,6 +36,10 @@ process transformed that content into instruction pairs and model weights.
 HowTo uses or redistributes the resulting model weights without modifying
 the weights. No endorsement by tldr-pages or its contributors is implied.
 
-HowTo uses llama.cpp as its local inference runtime. llama.cpp is licensed
-under the MIT License, Copyright 2023-2026 The ggml authors. Any distribution
-that bundles llama.cpp must include its copyright and MIT permission notice.
+HowTo statically compiles the llama.cpp/ggml inference runtime into the howto
+executable through the llama-cpp-rs bindings; no separate llama-server is
+required. llama-cpp-rs is Copyright Dial AI and is used under its MIT license
+option. llama.cpp/ggml is licensed under the MIT License, Copyright 2023-2026
+The ggml authors. Their full notices are reproduced in
+THIRD_PARTY_LICENSES.txt and docs/ATTRIBUTION.md and must accompany every
+binary distribution.

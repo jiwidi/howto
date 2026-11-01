@@ -14,6 +14,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  LLAMA_BUILD_SHARED_LIBS: "0"
   RUST_TOOLCHAIN: 1.86.0
 
 jobs:
@@ -71,6 +72,12 @@ jobs:
             --no-self-update
           rustup default "$RUST_TOOLCHAIN"
 
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            clang cmake libclang-dev
+
       - name: Run release checks
         run: |
           cargo fmt --all --check
@@ -78,6 +85,12 @@ jobs:
           cargo test --locked --all-targets --all-features
           cargo fetch --locked
           scripts/generate-third-party-licenses.py --check
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" \
+            python3 -m py_compile \
+              scripts/import-model-catalog.py \
+              tests/test_import_model_catalog.py
+          PYTHONPYCACHEPREFIX="$RUNNER_TEMP/pycache" \
+            python3 -m unittest tests/test_import_model_catalog.py
 
       - name: Install MSRV-compatible cargo-audit
         run: cargo install cargo-audit --version 0.22.1 --locked
@@ -122,6 +135,13 @@ jobs:
             --no-self-update
           rustup default "$RUST_TOOLCHAIN"
 
+      - name: Install native build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes \
+            clang cmake libclang-dev
+
       - name: Build
         run: cargo build --locked --release --target "${{ matrix.target }}"
 
@@ -131,6 +151,7 @@ jobs:
           binary="target/${{ matrix.target }}/release/howto"
           "$binary" --version
           "$binary" --help
+          scripts/verify-release-binary.sh "$binary"
           if [[ "$RUNNER_OS" == macOS ]]; then
             codesign --force --sign - "$binary"
             codesign --verify --strict --verbose=2 "$binary"
@@ -149,6 +170,7 @@ jobs:
             PRIVACY.md SECURITY.md THIRD_PARTY_LICENSES.txt \
             "$staging/"
           cp -R docs completions man shell "$staging/"
+          scripts/verify-release-binary.sh "$staging/howto" "$staging"
           archive_mtime="$(git show -s --format=%ct "$GITHUB_SHA")"
           scripts/create-release-archive.py \
             "$staging" \
@@ -222,6 +244,16 @@ jobs:
           for required in \
             Cargo.toml Cargo.lock LICENSE NOTICE README.md \
             THIRD_PARTY_LICENSES.txt docs/ATTRIBUTION.md \
+            models/catalog.rs.inc \
+            scripts/generate-third-party-licenses.py \
+            scripts/import-model-catalog.py \
+            scripts/license-fallbacks/llama-cpp-rs-LICENSE-MIT.txt \
+            scripts/license-fallbacks/llama.cpp-LICENSE-MIT.txt \
+            scripts/license-fallbacks/rust-cuda-LICENSE-MIT.txt \
+            scripts/license-fallbacks/valuable-LICENSE-MIT.txt \
+            scripts/update-homebrew-formula.sh \
+            scripts/verify-release-binary.sh \
+            tests/test_import_model_catalog.py \
             shell/howto.zsh shell/howto.bash shell/howto.fish; do
             tar -tzf "dist/$source_archive" "howto-${version}/$required" >/dev/null
           done
@@ -290,7 +322,7 @@ jobs:
           - macos-26
           - ubuntu-24.04
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 50
+    timeout-minutes: 75
     permissions:
       contents: read
       attestations: read
