@@ -7,9 +7,14 @@ updates:
       day: monday
     open-pull-requests-limit: 5
     ignore:
-      # sha2 0.11 requires rustc 1.88. The crate MSRV is 1.86.
+      # The crate MSRV is 1.86. sha2 0.11 requires rustc 1.88.
       - dependency-name: sha2
         versions: [">=0.11"]
+      # tree-sitter 0.27 and tree-sitter-language 0.1.8 require rustc 1.90.
+      - dependency-name: tree-sitter
+        versions: [">=0.27"]
+      - dependency-name: tree-sitter-language
+        versions: [">=0.1.8"]
       # Pinned to the qualified llama.cpp revision. Update it by hand after
       # the models pass qualification on the new revision.
       - dependency-name: llama-cpp-2
