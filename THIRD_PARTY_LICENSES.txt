@@ -4,8 +4,8 @@ HowTo third-party dependency licenses and notices
 Generated deterministically from Cargo.lock by
 scripts/generate-third-party-licenses.py. Do not edit by hand.
 
-Locked third-party packages: 213
-Unique included license/notice texts: 151
+Locked third-party packages: 214
+Unique included license/notice texts: 152
 
 PACKAGE INDEX
 =============
@@ -345,6 +345,14 @@ find_cuda_helper 0.2.0
   Repository: https://github.com/Rust-GPU/Rust-CUDA
   Included files:
     - rust-cuda-LICENSE-MIT.txt (SHA-256 2896679a729aa47ca5baf4cb49c26f86f19f0524449f0b6ae4943bb806f8f482)
+
+foldhash 0.2.0
+  Declared license: Zlib
+  Source: registry+https://github.com/rust-lang/crates.io-index
+  Cargo checksum: 77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb
+  Repository: https://github.com/orlp/foldhash
+  Included files:
+    - LICENSE (SHA-256 1d4c38d56650edc2c673cadbec74bec14db1fe8f2f10f4e3477dcbb49563be40)
 
 form_urlencoded 1.2.2
   Declared license: MIT OR Apache-2.0
@@ -700,10 +708,10 @@ js-sys 0.3.104
     - LICENSE-APACHE (SHA-256 a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2)
     - LICENSE-MIT (SHA-256 378f5840b258e2779c39418f3f2d7b2ba96f1c7917dd6be0713f88305dbda397)
 
-libc 0.2.189
+libc 0.2.191
   Declared license: MIT OR Apache-2.0
   Source: registry+https://github.com/rust-lang/crates.io-index
-  Cargo checksum: 3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2
+  Cargo checksum: 65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a
   Repository: https://github.com/rust-lang/libc
   Included files:
     - LICENSE-APACHE (SHA-256 62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a)
@@ -1194,10 +1202,10 @@ serde_derive 1.0.229
     - LICENSE-APACHE (SHA-256 62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a)
     - LICENSE-MIT (SHA-256 23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3)
 
-serde_json 1.0.151
+serde_json 1.0.154
   Declared license: MIT OR Apache-2.0
   Source: registry+https://github.com/rust-lang/crates.io-index
-  Cargo checksum: c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14
+  Cargo checksum: e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6
   Repository: https://github.com/serde-rs/json
   Included files:
     - LICENSE-APACHE (SHA-256 62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a)
@@ -2557,7 +2565,7 @@ designated (see the individual files for PD/CC0-dedicated sections).
 
 SHA-256 123a331b5dbf04c30097fa43b8f858bc85df671fe776de498d01f3d6b7c1f69e
 Used by:
-  - libc 0.2.189 (LICENSE-MIT)
+  - libc 0.2.191 (LICENSE-MIT)
 
 Copyright (c) The Rust Project Developers
 
@@ -2864,6 +2872,32 @@ Used by:
 
 ------------------------------------------------------------------------
 
+SHA-256 1d4c38d56650edc2c673cadbec74bec14db1fe8f2f10f4e3477dcbb49563be40
+Used by:
+  - foldhash 0.2.0 (LICENSE)
+
+Copyright (c) 2024 Orson Peters
+
+This software is provided 'as-is', without any express or implied warranty. In
+no event will the authors be held liable for any damages arising from the use of
+this software.
+
+Permission is granted to anyone to use this software for any purpose, including
+commercial applications, and to alter it and redistribute it freely, subject to
+the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not claim
+    that you wrote the original software. If you use this software in a product,
+    an acknowledgment in the product documentation would be appreciated but is
+    not required.
+
+2. Altered source versions must be plainly marked as such, and must not be
+    misrepresented as being the original software.
+
+3. This notice may not be removed or altered from any source distribution.
+
+------------------------------------------------------------------------
+
 SHA-256 1d85bd754b04ceec93e98e890edd1fa3c6a22e81bcb32135806beeccefa51cd1
 Used by:
   - jni-sys 0.4.1 (LICENSE-MIT)
@@ -3051,7 +3085,7 @@ Used by:
   - serde 1.0.229 (LICENSE-MIT)
   - serde_core 1.0.229 (LICENSE-MIT)
   - serde_derive 1.0.229 (LICENSE-MIT)
-  - serde_json 1.0.151 (LICENSE-MIT)
+  - serde_json 1.0.154 (LICENSE-MIT)
   - simd_cesu8 1.2.0 (LICENSE-MIT)
   - syn 2.0.119 (LICENSE-MIT)
   - syn 3.0.3 (LICENSE-MIT)
@@ -5489,7 +5523,7 @@ DEALINGS IN THE SOFTWARE.
 SHA-256 62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a
 Used by:
   - itoa 1.0.18 (LICENSE-APACHE)
-  - libc 0.2.189 (LICENSE-APACHE)
+  - libc 0.2.191 (LICENSE-APACHE)
   - prettyplease 0.2.37 (LICENSE-APACHE)
   - proc-macro2 1.0.107 (LICENSE-APACHE)
   - quote 1.0.47 (LICENSE-APACHE)
@@ -5499,7 +5533,7 @@ Used by:
   - serde 1.0.229 (LICENSE-APACHE)
   - serde_core 1.0.229 (LICENSE-APACHE)
   - serde_derive 1.0.229 (LICENSE-APACHE)
-  - serde_json 1.0.151 (LICENSE-APACHE)
+  - serde_json 1.0.154 (LICENSE-APACHE)
   - syn 2.0.119 (LICENSE-APACHE)
   - syn 3.0.3 (LICENSE-APACHE)
   - thiserror 2.0.20 (LICENSE-APACHE)
