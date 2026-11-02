@@ -6,6 +6,13 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 5
+    ignore:
+      # sha2 0.11 requires rustc 1.88. The crate MSRV is 1.86.
+      - dependency-name: sha2
+        versions: [">=0.11"]
+      # Pinned to the qualified llama.cpp revision. Update it by hand after
+      # the models pass qualification on the new revision.
+      - dependency-name: llama-cpp-2
     groups:
       rust-dependencies:
         patterns:
