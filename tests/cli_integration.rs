@@ -6,6 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use howto::config::{self, Config};
+use howto::model_catalog::ModelProfile;
 use howto::paths::Paths;
 use howto::{setup, shell};
 use sha2::{Digest, Sha256};
@@ -983,7 +984,7 @@ fn doctor_falls_back_to_the_openai_models_route() {
 }
 
 #[test]
-fn local_doctor_rejects_an_unrelated_executable_and_custom_manifest_is_null() {
+fn local_doctor_uses_embedded_runtime_and_custom_artifact_metadata_is_null() {
     let directory = tempfile::tempdir().unwrap();
     let paths = Paths::under(directory.path().to_path_buf());
     paths.create().unwrap();
@@ -1009,11 +1010,12 @@ fn local_doctor_rejects_an_unrelated_executable_and_custom_manifest_is_null() {
         .env_remove("HOWTO_LLAMA_SERVER")
         .output()
         .unwrap();
-    assert_eq!(doctor.status.code(), Some(1));
+    assert!(doctor.status.success());
     let value: serde_json::Value = serde_json::from_slice(&doctor.stdout).unwrap();
-    assert_eq!(value["ready"], false);
-    assert_eq!(value["llama_server_path"], serde_json::Value::Null);
-    assert_eq!(value["llama_server_usable"], serde_json::Value::Null);
+    assert_eq!(value["ready"], true);
+    assert_eq!(value["embedded_runtime"], true);
+    assert_eq!(value["model_profile"], serde_json::Value::Null);
+    assert_eq!(value["model_artifact_id"], serde_json::Value::Null);
 
     let status = Command::new(env!("CARGO_BIN_EXE_howto"))
         .args(["model", "--json"])
@@ -1023,7 +1025,47 @@ fn local_doctor_rejects_an_unrelated_executable_and_custom_manifest_is_null() {
     assert!(status.status.success());
     let value: serde_json::Value = serde_json::from_slice(&status.stdout).unwrap();
     assert_eq!(value["installed"], true);
-    assert_eq!(value["manifest"], serde_json::Value::Null);
+    assert_eq!(value["artifact_id"], serde_json::Value::Null);
+    assert_eq!(value["profile"], serde_json::Value::Null);
+    assert_eq!(value["source"], "configured");
+}
+
+#[test]
+fn model_catalog_lists_research_tiers_and_refuses_unpublished_downloads() {
+    let directory = tempfile::tempdir().unwrap();
+    let list = Command::new(env!("CARGO_BIN_EXE_howto"))
+        .args(["model", "list", "--json"])
+        .env("HOWTO_HOME", directory.path())
+        .output()
+        .unwrap();
+    assert!(list.status.success());
+    let entries: Vec<serde_json::Value> = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(entries.len(), 4);
+    assert_eq!(entries[0]["profile"], "legacy");
+    assert_eq!(entries[0]["selected"], true);
+    assert_eq!(entries[0]["selectable"], false);
+    assert_eq!(entries[1]["profile"], "compact");
+    assert_eq!(entries[2]["profile"], "balanced");
+    assert_eq!(entries[3]["profile"], "accurate");
+    let profiles_are_published = ModelProfile::Balanced.entry().is_installable();
+    assert!(entries[1..]
+        .iter()
+        .all(|entry| entry["installable"] == profiles_are_published));
+
+    if !profiles_are_published {
+        let install = Command::new(env!("CARGO_BIN_EXE_howto"))
+            .args(["model", "install", "balanced", "--yes"])
+            .env("HOWTO_HOME", directory.path())
+            .output()
+            .unwrap();
+        assert_eq!(install.status.code(), Some(3));
+        assert!(String::from_utf8_lossy(&install.stderr).contains("not available for installation"));
+        assert!(!directory
+            .path()
+            .join("models")
+            .join("howto-qwen35-0.8b")
+            .exists());
+    }
 }
 
 #[test]

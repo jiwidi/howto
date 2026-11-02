@@ -11,13 +11,15 @@ use crate::cli::{
     ShellCommand,
 };
 use crate::config::{self, Config};
+use crate::engine_runtime::{EngineSpec, Manager as EngineManager};
 use crate::error::{Error, Result};
 use crate::execute;
-use crate::inference::Generator;
-use crate::model::{self, Installer, ModelLocation, DEFAULT_MODEL};
+use crate::inference::{Generator, ProviderConnection};
+use crate::model::{self, InstallProgress, Installer, ModelSource, ResolvedModel};
+use crate::model_catalog::{catalog, ModelEntry, ModelProfile, ProductionBenchmark};
 use crate::paths::Paths;
 use crate::platform::Platform;
-use crate::runtime::{self, Manager};
+use crate::runtime::{self, Manager as LegacyManager};
 use crate::safety::{Assessment, Risk};
 use crate::{setup, shell};
 
@@ -47,20 +49,29 @@ fn run_query(options: QueryOptions) -> Result<i32> {
     paths.create()?;
     let config = config::load(&paths.config_file())?;
     ensure_setup_for_query(&options, &paths, &config)?;
+    // Interactive first-use setup can select and persist a different model
+    // profile. Continue the original query with that committed configuration,
+    // rather than the pre-setup defaults loaded above.
+    let config = config::load(&paths.config_file())?;
     let prompt = read_prompt(options.words)?;
     let platform = Platform::current();
 
-    let model_path = if config.server_url.is_some() {
-        PathBuf::new()
+    let connection = if config.server_url.is_some() {
+        let connection = LegacyManager::new(&config, &paths).ensure(&PathBuf::new())?;
+        ProviderConnection::configured(connection)
     } else {
-        ensure_model(&config, &paths)?.path().to_path_buf()
+        let model = ensure_model(&config, &paths)?;
+        let contract = local_engine_contract(&model, &config)?;
+        let manager = EngineManager::new(&config, &paths);
+        if manager.status()?.is_none() && !options.quiet {
+            eprintln!("Starting the embedded local model…");
+        }
+        ProviderConnection::embedded(
+            manager.ensure(&contract.spec)?,
+            contract.stop_strings,
+            contract.stop_token_ids,
+        )
     };
-
-    let manager = Manager::new(&config, &paths);
-    if config.server_url.is_none() && manager.status()?.is_none() && !options.quiet {
-        eprintln!("Starting the local model…");
-    }
-    let connection = manager.ensure(&model_path)?;
     let generation =
         Generator::new(&connection, &config, platform).generate(&prompt, options.count)?;
     let assessments = generation
@@ -98,7 +109,7 @@ fn run_query(options: QueryOptions) -> Result<i32> {
                 "platform": platform.name(),
                 "commands": commands,
                 "elapsed_ms": generation.elapsed_ms,
-                "provider": if connection.managed { "local" } else { "configured" },
+                "provider": if connection.is_local() { "local" } else { "configured" },
             }))?
         );
     } else {
@@ -366,11 +377,10 @@ fn ensure_setup_for_query(options: &QueryOptions, paths: &Paths, config: &Config
             "HowTo setup has not been completed; run `howto setup` first".into(),
         ));
     }
-    let setup_prompt = format!(
-        "HowTo setup has not been completed. Run it now? This may download the {:.0} MiB local model. [Y/n] ",
-        DEFAULT_MODEL.size as f64 / 1_048_576.0
-    );
-    if !prompt_yes_no(&setup_prompt, true)? {
+    if !prompt_yes_no(
+        "HowTo setup has not been completed. Run it now? [Y/n] ",
+        true,
+    )? {
         return Err(Error::Configuration(
             "setup was declined; run `howto setup` when you are ready".into(),
         ));
@@ -382,8 +392,8 @@ fn ensure_setup_for_query(options: &QueryOptions, paths: &Paths, config: &Config
             yes: false,
             no_shell: false,
             shell: None,
+            model: None,
         },
-        true,
     )?;
     if code == 0 {
         Ok(())
@@ -399,16 +409,16 @@ fn run_setup(options: SetupOptions) -> Result<i32> {
     let paths = Paths::discover()?;
     paths.create()?;
     let config = config::load(&paths.config_file())?;
-    run_setup_workflow(&paths, &config, &options, false)
+    run_setup_workflow(&paths, &config, &options)
 }
 
-fn run_setup_workflow(
-    paths: &Paths,
-    config: &Config,
-    options: &SetupOptions,
-    model_download_confirmed: bool,
-) -> Result<i32> {
+fn run_setup_workflow(paths: &Paths, _config: &Config, options: &SetupOptions) -> Result<i32> {
     let _lock = setup::Lock::acquire(paths)?;
+    // Config mutations use the same lock. Reload only after acquiring it so a
+    // setup that downloads a model or waits for consent cannot overwrite a
+    // newer, unrelated `howto config set` update with its caller's snapshot.
+    let current_config = config::load(&paths.config_file())?;
+    let config = &current_config;
     let (previous, quarantined) = setup::load_for_setup(paths)?;
     if let Some(path) = quarantined {
         eprintln!(
@@ -417,55 +427,87 @@ fn run_setup_workflow(
         );
     }
 
+    let mut setup_config = config.clone();
+    let custom_model = config.model_path.is_some()
+        || env::var_os("HOWTO_MODEL").is_some_and(|value| !value.is_empty());
+    if options.model.is_some() && (config.server_url.is_some() || custom_model) {
+        return Err(Error::Configuration(
+            "--model cannot be combined with server_url, model_path, or HOWTO_MODEL; remove the override before selecting a catalog profile"
+                .into(),
+        ));
+    }
+    if config.server_url.is_none() && !custom_model {
+        setup_config.model_profile = choose_setup_model_profile(
+            config.model_profile,
+            options,
+            previous.as_ref().is_some_and(setup::Receipt::is_complete),
+        )?;
+    }
+
     if let Some(url) = &config.server_url {
         eprintln!("Using the configured provider at {url}; no local model download is needed.");
+    } else if custom_model {
+        eprintln!("Using the configured custom model; the built-in profile selection is bypassed.");
+        let location = model::resolve_model(&setup_config, paths)?
+            .ok_or_else(|| Error::Model("the configured custom model is unavailable".into()))?;
+        eprintln!(
+            "Model is already available at {}.",
+            location.path().display()
+        );
     } else {
-        let runtime_path = runtime::resolve_llama_server(config)?;
-        if !runtime::probe_llama_server(&runtime_path) {
-            return Err(Error::Dependency(format!(
-                "{} did not pass the llama-server version check",
-                runtime_path.display()
-            )));
-        }
-        eprintln!("Runtime found at {}.", runtime_path.display());
+        eprintln!(
+            "Embedded local inference is included with HowTo; no separate runtime is needed."
+        );
         let mut install_required = false;
-        match model::resolve(config, paths)? {
-            Some(ModelLocation::Managed(path)) => {
-                if model::verify_sha256(&path, DEFAULT_MODEL.sha256)? {
-                    eprintln!("Model is already verified at {}.", path.display());
+        match model::resolve_model(&setup_config, paths)? {
+            Some(model) if model.source == ModelSource::Managed => {
+                if model::verify_resolved(&model)? == Some(true) {
+                    eprintln!("Model is already verified at {}.", model.path().display());
                 } else {
                     eprintln!(
                         "The managed model at {} failed verification and will be replaced.",
-                        path.display()
+                        model.path().display()
                     );
                     install_required = true;
                 }
             }
-            Some(ModelLocation::Packaged(path)) => {
-                if !model::verify_sha256(&path, DEFAULT_MODEL.sha256)? {
+            Some(model) if model.source == ModelSource::Packaged => {
+                if model::verify_resolved(&model)? != Some(true) {
                     return Err(Error::Model(format!(
                         "the packaged model at {} failed SHA-256 verification; repair or remove that package before setup",
-                        path.display()
+                        model.path().display()
                     )));
                 }
-                eprintln!("Packaged model is verified at {}.", path.display());
+                eprintln!("Packaged model is verified at {}.", model.path().display());
             }
-            Some(location @ ModelLocation::Configured(_)) => {
-                eprintln!(
-                    "Model is already available at {}.",
-                    location.path().display()
-                );
+            Some(model) => {
+                eprintln!("Model is already available at {}.", model.path().display());
             }
             None => install_required = true,
         }
         if install_required {
+            let entry = setup_config.model_profile.entry();
+            let download_bytes = entry
+                .artifacts()
+                .map(|files| {
+                    files
+                        .base
+                        .size_bytes
+                        .saturating_add(files.lora.map_or(0, |lora| lora.size_bytes))
+                })
+                .ok_or_else(|| {
+                    Error::Model(format!(
+                        "{} is not available for installation yet",
+                        entry.display_name
+                    ))
+                })?;
             let confirmed = options.yes
-                || model_download_confirmed
                 || (interactive()
                     && prompt_yes_no(
                         &format!(
-                            "Download the local model ({:.0} MiB)? [Y/n] ",
-                            DEFAULT_MODEL.size as f64 / 1_048_576.0
+                            "Download {} ({:.0} MiB)? [Y/n] ",
+                            entry.display_name,
+                            download_bytes as f64 / 1_048_576.0
                         ),
                         true,
                     )?);
@@ -473,7 +515,7 @@ fn run_setup_workflow(
                 eprintln!("Setup was not completed.");
                 return Ok(1);
             }
-            install_model(paths)?;
+            install_model(paths, setup_config.model_profile)?;
         }
     }
 
@@ -631,6 +673,7 @@ fn run_setup_workflow(
         .as_ref()
         .is_some_and(|receipt| receipt.failed_command_advisor_prompted);
     let mut checkpoint_receipt = setup::Receipt::new(None);
+    checkpoint_receipt.complete = previous.as_ref().is_some_and(setup::Receipt::is_complete);
     checkpoint_receipt.set_shell(
         chosen_shell.map(shell::Kind::name),
         chosen_startup_files.clone(),
@@ -640,7 +683,7 @@ fn run_setup_workflow(
         return Err(with_shell_rollback(error, &shell_changes));
     }
 
-    let mut new_config = config.clone();
+    let mut new_config = setup_config;
     let mut advisor_prompted = previous_advisor_prompted;
     if let Some(kind) = chosen_shell.filter(|kind| {
         config.server_url.is_none() && shell::failed_command_advisor_supported(*kind)
@@ -680,6 +723,7 @@ fn run_setup_workflow(
     }
 
     let mut new_receipt = checkpoint_receipt;
+    new_receipt.complete = true;
     new_receipt.failed_command_advisor_prompted = advisor_prompted;
     if let Err(error) = setup::save(paths, &new_receipt) {
         if config_changed {
@@ -704,6 +748,150 @@ fn run_setup_workflow(
         eprintln!("Open a new terminal to activate the Tab shortcut.");
     }
     Ok(0)
+}
+
+fn choose_setup_model_profile(
+    current: ModelProfile,
+    options: &SetupOptions,
+    setup_already_completed: bool,
+) -> Result<ModelProfile> {
+    if let Some(profile) = options.model {
+        ensure_profile_installable(profile)?;
+        return Ok(profile);
+    }
+    if setup_already_completed {
+        return Ok(current);
+    }
+    if current != ModelProfile::Legacy {
+        ensure_profile_installable(current)?;
+        return Ok(current);
+    }
+
+    let available = ModelProfile::USER_CHOICES
+        .into_iter()
+        .filter(|profile| profile.entry().is_installable())
+        .collect::<Vec<_>>();
+    if available.is_empty() {
+        // The branch can ship the engine/catalog machinery before publishing
+        // tuned derivatives. Existing installs remain usable and no mutable or
+        // legally unqualified artifact URL is ever substituted silently.
+        eprintln!(
+            "The new Compact, Balanced, and Accurate profiles are awaiting final artifact qualification; using the pinned legacy model for this setup."
+        );
+        return Ok(ModelProfile::Legacy);
+    }
+
+    let default = if available.contains(&ModelProfile::Balanced) {
+        ModelProfile::Balanced
+    } else {
+        available[0]
+    };
+    if options.yes {
+        return Ok(default);
+    }
+    if !interactive() {
+        return Err(Error::Configuration(
+            "non-interactive setup needs --yes or an explicit --model <compact|balanced|accurate>"
+                .into(),
+        ));
+    }
+
+    eprintln!("Choose a local model. It stays on this machine and can be changed later.\n");
+    for (index, profile) in available.iter().enumerate() {
+        print_setup_model_choice(index + 1, profile.entry(), *profile == default);
+    }
+    if available
+        .iter()
+        .all(|profile| profile.entry().production_benchmarks.is_some())
+    {
+        eprintln!(
+            "Quality is executable pass@1 for the exact downloadable artifact; latency and RAM use the qualified platform shown for each model."
+        );
+    } else {
+        eprintln!(
+            "Research figures are provisional until the exact downloadable artifacts pass Mac/Linux qualification."
+        );
+    }
+    eprint!("Choose [{}]: ", default.as_str());
+    io::stderr().flush()?;
+    let mut answer = String::new();
+    if io::stdin().read_line(&mut answer)? == 0 {
+        return Err(Error::Configuration(
+            "model selection was cancelled at end of input".into(),
+        ));
+    }
+    let answer = answer.trim();
+    if answer.is_empty() {
+        return Ok(default);
+    }
+    if let Ok(index) = answer.parse::<usize>() {
+        return available
+            .get(index.saturating_sub(1))
+            .copied()
+            .ok_or_else(|| {
+                Error::Configuration(format!(
+                    "model selection must be between 1 and {}",
+                    available.len()
+                ))
+            });
+    }
+    let selected = answer.parse::<ModelProfile>().map_err(|_| {
+        Error::Configuration("choose compact, balanced, accurate, or a listed number".into())
+    })?;
+    if available.contains(&selected) {
+        Ok(selected)
+    } else {
+        ensure_profile_installable(selected)?;
+        Ok(selected)
+    }
+}
+
+fn ensure_profile_installable(profile: ModelProfile) -> Result<()> {
+    if profile == ModelProfile::Legacy {
+        return Err(Error::Configuration(
+            "legacy is upgrade-only; choose compact, balanced, or accurate".into(),
+        ));
+    }
+    let entry = profile.entry();
+    if let Some(reason) = entry.release.unavailable_reason() {
+        return Err(Error::Model(format!(
+            "{} is not available for installation yet: {reason}",
+            entry.display_name
+        )));
+    }
+    Ok(())
+}
+
+fn print_setup_model_choice(index: usize, entry: &ModelEntry, recommended: bool) {
+    let recommendation = if recommended { " (recommended)" } else { "" };
+    eprintln!("  {index}) {}{recommendation}", entry.display_name);
+    eprintln!("     {}", entry.summary);
+    if let Some(benchmark) = entry
+        .production_benchmarks
+        .and_then(crate::model_catalog::ProductionBenchmarks::for_current_target)
+    {
+        eprintln!(
+            "     {:.1}% command success · {:.0} MiB download · ~{:.1} GiB RAM · {:.0} ms mean",
+            benchmark.executable_pass_at_1 * 100.0,
+            entry.reference_disk_bytes as f64 / 1_048_576.0,
+            benchmark.recommended_ram_bytes as f64 / 1_073_741_824.0,
+            benchmark.mean_latency_ms,
+        );
+        eprintln!("     Qualified on {}", benchmark.platform);
+    } else if let Some(benchmark) = entry.benchmark {
+        let ram = entry.recommended_ram_mib.map_or_else(
+            || "RAM pending".to_owned(),
+            |mib| format!("~{:.1} GiB RAM", f64::from(mib) / 1024.0),
+        );
+        eprintln!(
+            "     Research: {:.1}% command success · ~{:.0} MiB disk · {ram} · {:.0} ms mean",
+            benchmark.pass_rate_percent(),
+            entry.reference_disk_bytes as f64 / 1_048_576.0,
+            benchmark.mean_latency_micros as f64 / 1_000.0,
+        );
+        eprintln!("     Provisional; measured in {}", benchmark.environment);
+    }
+    eprintln!();
 }
 
 fn with_shell_rollback(error: Error, changes: &[shell::EnableResult]) -> Error {
@@ -817,37 +1005,68 @@ fn interactive() -> bool {
     io::stdin().is_terminal() && io::stderr().is_terminal()
 }
 
-fn ensure_model(config: &Config, paths: &Paths) -> Result<ModelLocation> {
-    if let Some(location) = model::resolve(config, paths)? {
-        return Ok(location);
-    }
-    Err(Error::Model(format!(
-        "the local model is unavailable; run `howto setup` to repair it (downloads {:.0} MiB if needed)",
-        DEFAULT_MODEL.size as f64 / 1_048_576.0
-    )))
+const CUSTOM_MODEL_STOPS: &[&str] = &["\n", "<|im_end|>", "```"];
+
+struct LocalEngineContract {
+    spec: EngineSpec,
+    stop_strings: &'static [&'static str],
+    stop_token_ids: &'static [i32],
 }
 
-fn install_model(paths: &Paths) -> Result<PathBuf> {
-    eprintln!(
-        "Downloading {} from Hugging Face (resume supported)…",
-        DEFAULT_MODEL.display_name
-    );
+fn local_engine_contract(model: &ResolvedModel, config: &Config) -> Result<LocalEngineContract> {
+    let mut spec = EngineSpec::from_config(model.path(), config)?;
+    spec.lora_adapter.clone_from(&model.lora_path);
+    if let Some(entry) = model.entry() {
+        spec.prompt_format = entry.prompt_format;
+        spec.model_id = entry.artifact_id.to_owned();
+        Ok(LocalEngineContract {
+            spec,
+            stop_strings: entry.stop_strings,
+            stop_token_ids: entry.stop_token_ids,
+        })
+    } else {
+        Ok(LocalEngineContract {
+            spec,
+            stop_strings: CUSTOM_MODEL_STOPS,
+            stop_token_ids: &[],
+        })
+    }
+}
+
+fn ensure_model(config: &Config, paths: &Paths) -> Result<ResolvedModel> {
+    if let Some(location) = model::resolve_model(config, paths)? {
+        return Ok(location);
+    }
+    Err(Error::Model(
+        "the selected local model is unavailable; run `howto setup` or `howto model install` to repair it"
+            .into(),
+    ))
+}
+
+fn install_model(paths: &Paths, profile: ModelProfile) -> Result<ResolvedModel> {
+    let entry = profile.entry();
+    eprintln!("Downloading {} (resume supported)…", entry.display_name);
     let mut last_percent = u64::MAX;
-    let path = Installer::new()?.install(paths, |downloaded, total| {
-        let percent = downloaded.saturating_mul(100) / total.max(1);
-        if percent != last_percent {
-            eprint!(
-                "\r  {:>3}%  {:.1}/{:.1} MiB",
-                percent,
-                downloaded as f64 / 1_048_576.0,
-                total as f64 / 1_048_576.0
-            );
-            let _ = io::stderr().flush();
-            last_percent = percent;
-        }
-    })?;
-    eprintln!("\nVerified SHA-256 and installed {}.", path.display());
-    Ok(path)
+    let model =
+        Installer::new()?.install_profile(paths, profile, |progress: InstallProgress| {
+            let percent =
+                progress.bundle_downloaded.saturating_mul(100) / progress.bundle_total.max(1);
+            if percent != last_percent {
+                eprint!(
+                    "\r  {:>3}%  {:.1}/{:.1} MiB",
+                    percent,
+                    progress.bundle_downloaded as f64 / 1_048_576.0,
+                    progress.bundle_total as f64 / 1_048_576.0
+                );
+                let _ = io::stderr().flush();
+                last_percent = percent;
+            }
+        })?;
+    eprintln!(
+        "\nVerified every artifact and installed {}.",
+        model.model_path.display()
+    );
+    Ok(model)
 }
 
 fn run_model(command: ModelCommand) -> Result<i32> {
@@ -856,30 +1075,44 @@ fn run_model(command: ModelCommand) -> Result<i32> {
     paths.create()?;
     let config = config::load(&paths.config_file())?;
     match command {
-        ModelCommand::Install { yes } => {
-            if let Some(location) = model::resolve(&config, &paths)? {
-                match location {
-                    ModelLocation::Configured(_) | ModelLocation::Packaged(_) => {
-                        eprintln!(
-                            "Model is already available at {}.",
-                            location.path().display()
-                        );
-                        return Ok(0);
-                    }
-                    ModelLocation::Managed(ref path)
-                        if model::verify_sha256(path, DEFAULT_MODEL.sha256)? =>
-                    {
-                        eprintln!("Model is already verified at {}.", path.display());
-                        return Ok(0);
-                    }
-                    ModelLocation::Managed(ref path) => {
-                        eprintln!(
-                            "The managed model at {} failed verification and will be replaced.",
-                            path.display()
-                        );
-                    }
-                }
+        ModelCommand::List { json } => print_model_list(&config, &paths, json),
+        ModelCommand::Install { yes, profile } => {
+            if config.server_url.is_some()
+                || config.model_path.is_some()
+                || env::var_os("HOWTO_MODEL").is_some_and(|value| !value.is_empty())
+            {
+                return Err(Error::Model(
+                    "catalog model installation is unavailable while server_url, model_path, or HOWTO_MODEL overrides local selection"
+                        .into(),
+                ));
             }
+            let target = profile.unwrap_or(config.model_profile);
+            let entry = target.entry();
+            ensure_profile_available_for_install(target, profile.is_none())?;
+            if let Some(model) = model::resolve_profile(target, &paths)? {
+                if model::verify_resolved(&model)? == Some(true) {
+                    eprintln!("Model is already verified at {}.", model.path().display());
+                    select_model_profile(&paths, target)?;
+                    return Ok(0);
+                }
+                if model.source == ModelSource::Packaged {
+                    return Err(Error::Model(format!(
+                        "the packaged {} bundle failed verification; repair the package before selecting it",
+                        entry.display_name
+                    )));
+                }
+                eprintln!(
+                    "The managed model at {} failed verification and will be replaced.",
+                    model.path().display()
+                );
+            }
+            let files = entry
+                .artifacts()
+                .ok_or_else(|| Error::Model(format!("{} is not published", entry.display_name)))?;
+            let download_bytes = files
+                .base
+                .size_bytes
+                .saturating_add(files.lora.map_or(0, |lora| lora.size_bytes));
             if !yes {
                 if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
                     return Err(Error::Model(
@@ -887,8 +1120,9 @@ fn run_model(command: ModelCommand) -> Result<i32> {
                     ));
                 }
                 eprint!(
-                    "Download {:.0} MiB to {}? [y/N] ",
-                    DEFAULT_MODEL.size as f64 / 1_048_576.0,
+                    "Download {} ({:.0} MiB) to {}? [y/N] ",
+                    entry.display_name,
+                    download_bytes as f64 / 1_048_576.0,
                     paths.models_dir().display()
                 );
                 io::stderr().flush()?;
@@ -899,11 +1133,177 @@ fn run_model(command: ModelCommand) -> Result<i32> {
                     return Ok(0);
                 }
             }
-            install_model(&paths)?;
+            install_model(&paths, target)?;
+            select_model_profile(&paths, target)?;
             Ok(0)
         }
         ModelCommand::Status { json, deep } => print_model_status(&config, &paths, json, deep),
     }
+}
+
+fn print_model_list(config: &Config, paths: &Paths, json_output: bool) -> Result<i32> {
+    if json_output {
+        let entries = catalog()
+            .iter()
+            .map(|entry| -> Result<Value> {
+                let installed = entry.is_installable()
+                    && model::resolve_profile(entry.profile, paths)?.is_some();
+                let production = entry.production_benchmarks;
+                let current_production = production.and_then(
+                    crate::model_catalog::ProductionBenchmarks::for_current_target,
+                );
+                Ok(json!({
+                    "profile": entry.profile,
+                    "name": entry.display_name,
+                    "summary": entry.summary,
+                    "selected": entry.profile == config.model_profile,
+                    "selectable": entry.profile != ModelProfile::Legacy,
+                    "installable": entry.is_installable(),
+                    "installed": installed,
+                    "reference_disk_bytes": entry.reference_disk_bytes,
+                    "recommended_ram_bytes": current_production
+                        .map(|benchmark| benchmark.recommended_ram_bytes)
+                        .or_else(|| entry.recommended_ram_mib.map(|mib| u64::from(mib) * 1_048_576)),
+                    "quality": entry.benchmark.map(|benchmark| json!({
+                        "executable_passes": benchmark.executable_passes,
+                        "tasks": benchmark.task_count,
+                        "percent": benchmark.pass_rate_percent(),
+                        "environment": benchmark.environment,
+                        "caveat": benchmark.caveat,
+                    })),
+                    "production_benchmark": current_production.map(production_benchmark_json),
+                    "production_benchmarks": production.map(|benchmarks| json!({
+                        "macos-arm64": production_benchmark_json(benchmarks.macos_arm64),
+                        "macos-x86_64": production_benchmark_json(benchmarks.macos_x86_64),
+                        "linux-arm64": production_benchmark_json(benchmarks.linux_arm64),
+                        "linux-x86_64": production_benchmark_json(benchmarks.linux_x86_64),
+                    })),
+                    "unavailable_reason": entry.release.unavailable_reason(),
+                }))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(0);
+    }
+
+    println!("Local model profiles:\n");
+    for profile in ModelProfile::ALL {
+        let entry = profile.entry();
+        let installed = entry.is_installable() && model::resolve_profile(profile, paths)?.is_some();
+        let mut labels = Vec::new();
+        if profile == config.model_profile {
+            labels.push("selected");
+        }
+        if profile == ModelProfile::Balanced {
+            labels.push("recommended");
+        }
+        if profile == ModelProfile::Legacy {
+            labels.push("upgrade-only");
+        }
+        if installed {
+            labels.push("installed");
+        }
+        let labels = if labels.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", labels.join(", "))
+        };
+        println!("  {}{labels}", entry.display_name);
+        println!("    {}", entry.summary);
+        if let Some(benchmark) = entry
+            .production_benchmarks
+            .and_then(crate::model_catalog::ProductionBenchmarks::for_current_target)
+        {
+            println!(
+                "    {:.1}% executable pass@1; {:.0} MiB download; ~{:.1} GiB RAM; {:.0} ms mean",
+                benchmark.executable_pass_at_1 * 100.0,
+                entry.reference_disk_bytes as f64 / 1_048_576.0,
+                benchmark.recommended_ram_bytes as f64 / 1_073_741_824.0,
+                benchmark.mean_latency_ms,
+            );
+            println!("    Qualified on {}", benchmark.platform);
+        } else if let Some(benchmark) = entry.benchmark {
+            let ram = entry.recommended_ram_mib.map_or_else(
+                || "RAM pending".to_owned(),
+                |mib| format!("~{:.1} GiB RAM", f64::from(mib) / 1024.0),
+            );
+            println!(
+                "    Research: {:.1}% executable pass@1 ({} Linux/bash tasks); ~{:.0} MiB disk; {ram}; {:.0} ms mean",
+                benchmark.pass_rate_percent(),
+                benchmark.task_count,
+                entry.reference_disk_bytes as f64 / 1_048_576.0,
+                benchmark.mean_latency_micros as f64 / 1_000.0,
+            );
+            println!("    Provisional BF16 measurement on an NVIDIA RTX 5090");
+        }
+        if let Some(reason) = entry.release.unavailable_reason() {
+            println!("    Not yet installable: {reason}");
+        }
+        println!();
+    }
+    println!(
+        "Research numbers are provisional; published profiles use qualified GGUF measurements."
+    );
+    Ok(0)
+}
+
+fn production_benchmark_json(benchmark: ProductionBenchmark) -> Value {
+    json!({
+        "target": benchmark.target,
+        "executable_pass_at_1": benchmark.executable_pass_at_1,
+        "task_count": benchmark.task_count,
+        "mean_latency_ms": benchmark.mean_latency_ms,
+        "peak_rss_bytes": benchmark.peak_rss_bytes,
+        "recommended_ram_bytes": benchmark.recommended_ram_bytes,
+        "platform": benchmark.platform,
+        "prompt_policy_id": benchmark.prompt_policy_id,
+        "system_prompt_sha256": benchmark.system_prompt_sha256,
+        "rendered_prompt_sha256": benchmark.rendered_prompt_sha256,
+        "quality_report_sha256": benchmark.quality_report_sha256,
+        "performance_report_sha256": benchmark.performance_report_sha256,
+        "qualification_report_sha256": benchmark.qualification_report_sha256,
+        "runtime_llama_cpp_revision": benchmark.runtime_llama_cpp_revision,
+    })
+}
+
+fn ensure_profile_available_for_install(
+    profile: ModelProfile,
+    allow_legacy_repair: bool,
+) -> Result<()> {
+    if profile == ModelProfile::Legacy && !allow_legacy_repair {
+        return Err(Error::Model(
+            "legacy is upgrade-only; choose compact, balanced, or accurate".into(),
+        ));
+    }
+    let entry = profile.entry();
+    if let Some(reason) = entry.release.unavailable_reason() {
+        return Err(Error::Model(format!(
+            "{} is not available for installation yet: {reason}",
+            entry.display_name
+        )));
+    }
+    Ok(())
+}
+
+fn select_model_profile(paths: &Paths, profile: ModelProfile) -> Result<()> {
+    // The artifact download can take minutes. Re-read under the same lock used
+    // by setup/config mutations so selecting it cannot overwrite unrelated
+    // preferences changed in another terminal while the download ran.
+    let _lock = setup::Lock::acquire(paths)?;
+    let mut updated = config::load(&paths.config_file())?;
+    if updated.server_url.is_some() || updated.model_path.is_some() {
+        return Err(Error::Configuration(
+            "the model was installed, but selection was skipped because server_url or model_path changed during installation"
+                .into(),
+        ));
+    }
+    if updated.model_profile == profile {
+        return Ok(());
+    }
+    updated.model_profile = profile;
+    config::save(&paths.config_file(), &updated)?;
+    eprintln!("Selected the {profile} model profile.");
+    Ok(())
 }
 
 fn print_model_status(
@@ -912,53 +1312,70 @@ fn print_model_status(
     json_output: bool,
     deep: bool,
 ) -> Result<i32> {
-    let location = model::resolve(config, paths)?;
-    let Some(location) = location else {
+    let model = model::resolve_model(config, paths)?;
+    let Some(model) = model else {
         if json_output {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&json!({"installed": false}))?
+                serde_json::to_string_pretty(&json!({
+                    "installed": false,
+                    "selected_profile": config.model_profile,
+                }))?
             );
         } else {
             println!("Model: not installed");
         }
         return Ok(1);
     };
-    let path = location.path();
-    let size = fs::metadata(path)?.len();
-    let verified = if deep
-        && size == DEFAULT_MODEL.size
-        && matches!(
-            &location,
-            ModelLocation::Managed(_) | ModelLocation::Packaged(_)
-        ) {
-        Some(model::verify_sha256(path, DEFAULT_MODEL.sha256)?)
+    let path = model.path();
+    let base_size = fs::metadata(path)?.len();
+    let lora_size = model
+        .lora_path
+        .as_deref()
+        .map(fs::metadata)
+        .transpose()?
+        .map_or(0, |metadata| metadata.len());
+    let size = base_size.saturating_add(lora_size);
+    let verified = if deep {
+        model::verify_resolved(&model)?
     } else {
         None
     };
-    let manifest = matches!(
-        &location,
-        ModelLocation::Managed(_) | ModelLocation::Packaged(_)
-    )
-    .then_some(DEFAULT_MODEL.id);
+    let source = match model.source {
+        ModelSource::Configured => "configured",
+        ModelSource::Packaged => "packaged",
+        ModelSource::Managed => "managed",
+    };
     if json_output {
         println!(
             "{}",
             serde_json::to_string_pretty(&json!({
                 "installed": true,
                 "path": path,
+                "lora_path": model.lora_path,
                 "bytes": size,
+                "base_bytes": base_size,
+                "lora_bytes": lora_size,
                 "sha256_verified": verified,
-                "manifest": manifest,
+                "profile": model.profile,
+                "artifact_id": model.artifact_id,
+                "source": source,
             }))?
         );
     } else {
         println!("Model: {}", path.display());
+        println!(
+            "Profile: {}",
+            model.profile.map_or("custom", ModelProfile::as_str)
+        );
+        if let Some(lora) = &model.lora_path {
+            println!("LoRA:  {}", lora.display());
+        }
         println!("Size:  {:.1} MiB", size as f64 / 1_048_576.0);
         if let Some(verified) = verified {
             println!("SHA-256: {}", if verified { "verified" } else { "FAILED" });
         } else if deep {
-            println!("SHA-256: not checked (size differs from the bundled manifest)");
+            println!("SHA-256: unavailable for a custom model override");
         }
     }
     Ok(i32::from(verified == Some(false)))
@@ -969,35 +1386,58 @@ fn run_server(command: ServerCommand) -> Result<i32> {
     let paths = Paths::discover()?;
     paths.create()?;
     let config = config::load(&paths.config_file())?;
-    let manager = Manager::new(&config, &paths);
+    let manager = EngineManager::new(&config, &paths);
+    let legacy_manager = LegacyManager::new(&config, &paths);
     match command {
         ServerCommand::Status { json } => {
             let state = manager.status()?;
+            let legacy_state = legacy_manager.status()?;
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&json!({
                         "running": state.is_some(),
                         "state": state,
+                        "legacy_server_running": legacy_state.is_some(),
                     }))?
                 );
             } else if let Some(state) = state {
-                println!("Server: running (pid {})", state.pid);
+                println!("Engine: running (pid {})", state.pid);
                 println!("Model:  {}", state.model_path.display());
                 println!("Socket: {}", state.socket_path.display());
+                if let Some(legacy) = legacy_state {
+                    println!(
+                        "Legacy llama-server: still running (pid {}); `howto server stop` will clean it up",
+                        legacy.pid
+                    );
+                }
+            } else if let Some(legacy) = legacy_state {
+                println!(
+                    "Engine: stopped (legacy llama-server pid {} is still running)",
+                    legacy.pid
+                );
             } else {
-                println!("Server: stopped");
+                println!("Engine: stopped");
             }
             Ok(0)
         }
         ServerCommand::Stop { json } => {
             let stopped = manager.stop()?;
+            let legacy_stopped = legacy_manager.stop()?;
+            let any_stopped = stopped || legacy_stopped;
             if json {
-                println!("{}", json!({"stopped": stopped}));
-            } else if stopped {
-                println!("Stopped the HowTo model server.");
+                println!(
+                    "{}",
+                    json!({
+                        "stopped": any_stopped,
+                        "embedded_engine_stopped": stopped,
+                        "legacy_server_stopped": legacy_stopped,
+                    })
+                );
+            } else if any_stopped {
+                println!("Stopped the HowTo embedded model engine.");
             } else {
-                println!("Server was not running.");
+                println!("Model engine was not running.");
             }
             Ok(0)
         }
@@ -1282,25 +1722,24 @@ fn run_failed_command_advisor(status: u16) -> Result<i32> {
     }
 
     // No setup or download prompt is allowed from an automatic shell hook.
-    let Some(model) = model::resolve(&config, &paths)? else {
+    let Some(model) = model::resolve_model(&config, &paths)? else {
         return Err(Error::Model(
             "the local model is unavailable; run `howto setup` to repair it".into(),
         ));
     };
-    let manager = Manager::new(&config, &paths);
+    let contract = local_engine_contract(&model, &config)?;
+    let manager = EngineManager::new(&config, &paths);
     let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
         return Ok(1);
     };
-    let Some(connection) = manager.ensure_bounded(model.path(), remaining)? else {
+    let Some(connection) = manager.ensure_bounded(&contract.spec, remaining)? else {
         // Lock contention is transient (for example, another terminal may be
         // starting the server), so skip this suggestion without disabling the
         // advisor for the rest of the shell session.
         return Ok(1);
     };
-    if !connection.managed {
-        // Defense in depth if provider routing changes after the config gate.
-        return Ok(ADVISOR_UNAVAILABLE_EXIT);
-    }
+    let connection =
+        ProviderConnection::embedded(connection, contract.stop_strings, contract.stop_token_ids);
     let platform = Platform::current();
     let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
         return Ok(1);
@@ -1360,33 +1799,28 @@ fn run_doctor(json_output: bool, deep: bool) -> Result<i32> {
     let model = if external {
         None
     } else {
-        model::resolve(&config, &paths)?
+        model::resolve_model(&config, &paths)?
     };
-    let runtime_path = if external {
-        None
-    } else {
-        runtime::resolve_llama_server(&config).ok()
-    };
-    let runtime_usable = runtime_path.as_deref().map(runtime::probe_llama_server);
     let model_verified = if deep {
         model
             .as_ref()
-            .filter(|location| {
-                !matches!(location, ModelLocation::Configured(_))
-                    && fs::metadata(location.path())
-                        .is_ok_and(|meta| meta.len() == DEFAULT_MODEL.size)
-            })
-            .map(|location| model::verify_sha256(location.path(), DEFAULT_MODEL.sha256))
+            .map(model::verify_resolved)
             .transpose()?
+            .flatten()
     } else {
         None
     };
-    let manager = Manager::new(&config, &paths);
-    let provider_healthy = manager.configured_provider_healthy()?;
-    let server = manager.status()?;
-    let provider_ready = provider_healthy.unwrap_or_else(|| {
-        model.is_some() && runtime_usable == Some(true) && model_verified != Some(false)
-    });
+    let provider_healthy = if external {
+        LegacyManager::new(&config, &paths).configured_provider_healthy()?
+    } else {
+        None
+    };
+    let engine = EngineManager::new(&config, &paths).status()?;
+    let provider_ready = if external {
+        provider_healthy == Some(true)
+    } else {
+        model.is_some() && model_verified != Some(false)
+    };
     let ready = setup_complete && provider_ready;
     if json_output {
         println!(
@@ -1400,10 +1834,13 @@ fn run_doctor(json_output: bool, deep: bool) -> Result<i32> {
                 "server_url": config.server_url,
                 "provider_healthy": provider_healthy,
                 "model_path": model.as_ref().map(|location| location.path()),
+                "model_profile": model.as_ref().and_then(|model| model.profile),
+                "model_artifact_id": model.as_ref().and_then(|model| model.artifact_id),
+                "model_lora_path": model.as_ref().and_then(|model| model.lora_path.as_ref()),
                 "model_sha256_verified": model_verified,
-                "llama_server_path": runtime_path,
-                "llama_server_usable": runtime_usable,
-                "server_running": server.is_some(),
+                "embedded_runtime": !external,
+                "engine_running": engine.is_some(),
+                "server_running": engine.is_some(),
                 "config_path": paths.config_file(),
             }))?
         );
@@ -1442,27 +1879,11 @@ fn run_doctor(json_output: bool, deep: bool) -> Result<i32> {
                     if verified { "verified" } else { "FAILED" }
                 );
             }
-            println!(
-                "Runtime: {}",
-                runtime_path.as_ref().map_or_else(
-                    || "llama-server missing or invalid".into(),
-                    |path| path.display().to_string()
-                )
-            );
-            if runtime_path.is_some() {
-                println!(
-                    "Runtime check: {}",
-                    if runtime_usable == Some(true) {
-                        "llama-server --version succeeded"
-                    } else {
-                        "FAILED"
-                    }
-                );
-            }
+            println!("Runtime: embedded in the HowTo executable");
         }
         println!(
             "Server:  {}",
-            server.map_or_else(
+            engine.map_or_else(
                 || "stopped".into(),
                 |state| format!("running (pid {})", state.pid)
             )
@@ -1481,9 +1902,9 @@ fn run_config(command: ConfigCommand) -> Result<i32> {
     let paths = Paths::discover()?;
     paths.create()?;
     let path = paths.config_file();
-    let mut configuration = config::load(&path)?;
     match command {
         ConfigCommand::List { json } => {
+            let configuration = config::load(&path)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&configuration)?);
             } else {
@@ -1491,13 +1912,20 @@ fn run_config(command: ConfigCommand) -> Result<i32> {
             }
         }
         ConfigCommand::Path => println!("{}", path.display()),
-        ConfigCommand::Get { key } => println!("{}", config_value(&configuration, &key)?),
+        ConfigCommand::Get { key } => {
+            let configuration = config::load(&path)?;
+            println!("{}", config_value(&configuration, &key)?);
+        }
         ConfigCommand::Set { key, value } => {
+            let _lock = setup::Lock::acquire(&paths)?;
+            let mut configuration = config::load(&path)?;
             set_config_value(&mut configuration, &key, Some(&value))?;
             config::save(&path, &configuration)?;
             println!("Set {key}.");
         }
         ConfigCommand::Unset { key } => {
+            let _lock = setup::Lock::acquire(&paths)?;
+            let mut configuration = config::load(&path)?;
             set_config_value(&mut configuration, &key, None)?;
             config::save(&path, &configuration)?;
             println!("Reset {key} to its default.");
@@ -1508,6 +1936,7 @@ fn run_config(command: ConfigCommand) -> Result<i32> {
 
 fn config_value(config: &Config, key: &str) -> Result<String> {
     match key {
+        "model_profile" => Ok(config.model_profile.to_string()),
         "model_path" => Ok(optional_path(&config.model_path)),
         "llama_server_path" => Ok(optional_path(&config.llama_server_path)),
         "server_url" => Ok(config.server_url.clone().unwrap_or_else(|| "null".into())),
@@ -1515,6 +1944,7 @@ fn config_value(config: &Config, key: &str) -> Result<String> {
         "context_size" => Ok(config.context_size.to_string()),
         "max_tokens" => Ok(config.max_tokens.to_string()),
         "startup_timeout_seconds" => Ok(config.startup_timeout_seconds.to_string()),
+        "accelerator" => Ok(config.accelerator.to_string()),
         "show_tab_hint" => Ok(config.show_tab_hint.to_string()),
         "failed_command_advisor" => Ok(config.failed_command_advisor.to_string()),
         "shell_path" => Ok(config.shell_path.display().to_string()),
@@ -1531,6 +1961,12 @@ fn optional_path(path: &Option<PathBuf>) -> String {
 fn set_config_value(config: &mut Config, key: &str, value: Option<&str>) -> Result<()> {
     let defaults = Config::default();
     match key {
+        "model_profile" => {
+            let requested = value.unwrap_or("the default");
+            return Err(Error::Usage(format!(
+                "model_profile cannot be selected directly (`{requested}`); use `howto model install <compact|balanced|accurate>` so the artifact is verified before selection"
+            )));
+        }
         "model_path" => config.model_path = value.map(PathBuf::from),
         "llama_server_path" => config.llama_server_path = value.map(PathBuf::from),
         "server_url" => config.server_url = value.map(str::to_owned),
@@ -1542,6 +1978,14 @@ fn set_config_value(config: &mut Config, key: &str, value: Option<&str>) -> Resu
         "startup_timeout_seconds" => {
             config.startup_timeout_seconds =
                 parse_or_default(value, defaults.startup_timeout_seconds, key)?;
+        }
+        "accelerator" => {
+            config.accelerator =
+                value
+                    .map_or(Ok(defaults.accelerator), str::parse)
+                    .map_err(|error: String| {
+                        Error::Usage(format!("invalid value for `accelerator`: {error}"))
+                    })?;
         }
         "show_tab_hint" => {
             config.show_tab_hint = parse_or_default(value, defaults.show_tab_hint, key)?;
@@ -1572,6 +2016,7 @@ where
 
 fn print_config(config: &Config) {
     for key in [
+        "model_profile",
         "model_path",
         "llama_server_path",
         "server_url",
@@ -1579,6 +2024,7 @@ fn print_config(config: &Config) {
         "context_size",
         "max_tokens",
         "startup_timeout_seconds",
+        "accelerator",
         "show_tab_hint",
         "failed_command_advisor",
         "shell_path",
@@ -1592,8 +2038,14 @@ fn print_config(config: &Config) {
 
 #[cfg(test)]
 mod tests {
-    use super::{config_value, failed_command_advisor_available, read_prompt, set_config_value};
-    use crate::config::Config;
+    use super::{
+        choose_setup_model_profile, config_value, failed_command_advisor_available, read_prompt,
+        select_model_profile, set_config_value,
+    };
+    use crate::cli::SetupOptions;
+    use crate::config::{self, Accelerator, Config};
+    use crate::model_catalog::ModelProfile;
+    use crate::paths::Paths;
     use crate::{setup, shell};
 
     #[test]
@@ -1609,6 +2061,14 @@ mod tests {
         assert!(!config.show_tab_hint);
         assert_eq!(config_value(&config, "show_tab_hint").unwrap(), "false");
         assert!(set_config_value(&mut config, "show_tab_hint", Some("sometimes")).is_err());
+        assert!(set_config_value(&mut config, "model_profile", None).is_err());
+
+        set_config_value(&mut config, "accelerator", Some("cpu")).unwrap();
+        assert_eq!(config.accelerator, Accelerator::Cpu);
+        assert_eq!(config_value(&config, "accelerator").unwrap(), "cpu");
+        assert!(set_config_value(&mut config, "accelerator", Some("gpu")).is_err());
+        set_config_value(&mut config, "accelerator", None).unwrap();
+        assert_eq!(config.accelerator, Accelerator::Auto);
 
         set_config_value(&mut config, "failed_command_advisor", Some("true")).unwrap();
         assert!(config.failed_command_advisor);
@@ -1616,6 +2076,66 @@ mod tests {
             config_value(&config, "failed_command_advisor").unwrap(),
             "true"
         );
+    }
+
+    #[test]
+    fn setup_selection_preserves_existing_and_tracks_catalog_publication() {
+        let automatic = SetupOptions {
+            yes: true,
+            no_shell: true,
+            shell: None,
+            model: None,
+        };
+        assert_eq!(
+            choose_setup_model_profile(ModelProfile::Accurate, &automatic, true).unwrap(),
+            ModelProfile::Accurate
+        );
+        if ModelProfile::Accurate.entry().is_installable() {
+            assert_eq!(
+                choose_setup_model_profile(ModelProfile::Accurate, &automatic, false).unwrap(),
+                ModelProfile::Accurate
+            );
+        }
+        let expected_default = if ModelProfile::Balanced.entry().is_installable() {
+            ModelProfile::Balanced
+        } else {
+            ModelProfile::Legacy
+        };
+        assert_eq!(
+            choose_setup_model_profile(ModelProfile::Legacy, &automatic, false).unwrap(),
+            expected_default
+        );
+        let explicit = SetupOptions {
+            model: Some(ModelProfile::Balanced),
+            ..automatic
+        };
+        let explicit_result = choose_setup_model_profile(ModelProfile::Legacy, &explicit, false);
+        assert_eq!(
+            explicit_result.is_ok(),
+            ModelProfile::Balanced.entry().is_installable()
+        );
+    }
+
+    #[test]
+    fn profile_selection_reloads_and_preserves_concurrent_preferences() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = Paths::under(directory.path().join("state"));
+        paths.create().unwrap();
+        config::save(
+            &paths.config_file(),
+            &Config {
+                threads: 3,
+                show_tab_hint: false,
+                ..Config::default()
+            },
+        )
+        .unwrap();
+
+        select_model_profile(&paths, ModelProfile::Balanced).unwrap();
+        let selected = config::load(&paths.config_file()).unwrap();
+        assert_eq!(selected.model_profile, ModelProfile::Balanced);
+        assert_eq!(selected.threads, 3);
+        assert!(!selected.show_tab_hint);
     }
 
     #[test]

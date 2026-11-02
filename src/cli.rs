@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 
 use crate::error::{Error, Result};
+use crate::model_catalog::ModelProfile;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Invocation {
@@ -20,6 +21,7 @@ pub struct SetupOptions {
     pub yes: bool,
     pub no_shell: bool,
     pub shell: Option<String>,
+    pub model: Option<ModelProfile>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,8 +37,17 @@ pub struct QueryOptions {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelCommand {
-    Status { json: bool, deep: bool },
-    Install { yes: bool },
+    Status {
+        json: bool,
+        deep: bool,
+    },
+    List {
+        json: bool,
+    },
+    Install {
+        yes: bool,
+        profile: Option<ModelProfile>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -107,7 +118,8 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation
         "model"
             if arguments.len() == 1
                 || arguments.get(1).is_some_and(|argument| {
-                    matches!(argument.as_str(), "status" | "install") || argument.starts_with('-')
+                    matches!(argument.as_str(), "status" | "list" | "install")
+                        || argument.starts_with('-')
                 }) =>
         {
             parse_model(&arguments[1..])
@@ -153,6 +165,7 @@ fn parse_setup(arguments: &[String]) -> Result<Invocation> {
     let mut yes = false;
     let mut no_shell = false;
     let mut shell = None;
+    let mut model = None;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -168,6 +181,22 @@ fn parse_setup(arguments: &[String]) -> Result<Invocation> {
                 }
                 shell = Some(value.clone());
             }
+            "--model" => {
+                index += 1;
+                let value = arguments.get(index).ok_or_else(|| {
+                    Error::Usage("--model needs compact, balanced, or accurate".into())
+                })?;
+                let profile = value.parse::<ModelProfile>().map_err(|_| {
+                    Error::Usage("--model needs compact, balanced, or accurate".into())
+                })?;
+                if profile == ModelProfile::Legacy {
+                    return Err(Error::Usage(
+                        "--model accepts compact, balanced, or accurate; legacy is kept automatically for existing setups"
+                            .into(),
+                    ));
+                }
+                model = Some(profile);
+            }
             argument => return Err(Error::Usage(format!("unknown setup option `{argument}`"))),
         }
         index += 1;
@@ -181,6 +210,7 @@ fn parse_setup(arguments: &[String]) -> Result<Invocation> {
         yes,
         no_shell,
         shell,
+        model,
     }))
 }
 
@@ -315,18 +345,43 @@ fn parse_model(arguments: &[String]) -> Result<Invocation> {
             }
             Ok(Invocation::Model(ModelCommand::Status { json, deep }))
         }
+        "list" => match rest {
+            [] => Ok(Invocation::Model(ModelCommand::List { json: false })),
+            [flag] if flag == "--json" => Ok(Invocation::Model(ModelCommand::List { json: true })),
+            _ => Err(Error::Usage("usage: howto model list [--json]".into())),
+        },
         "install" => {
             let mut yes = false;
+            let mut profile = None;
             for argument in rest {
                 match argument.as_str() {
                     "-y" | "--yes" => yes = true,
-                    _ => return Err(Error::Usage(format!("unknown model option `{argument}`"))),
+                    option if option.starts_with('-') => {
+                        return Err(Error::Usage(format!("unknown model option `{argument}`")))
+                    }
+                    value if profile.is_none() => {
+                        profile = Some(value.parse::<ModelProfile>().map_err(|_| {
+                            Error::Usage(
+                                "model profile must be compact, balanced, or accurate".into(),
+                            )
+                        })?);
+                    }
+                    _ => {
+                        return Err(Error::Usage(
+                            "model install accepts at most one profile".into(),
+                        ))
+                    }
                 }
             }
-            Ok(Invocation::Model(ModelCommand::Install { yes }))
+            if profile == Some(ModelProfile::Legacy) {
+                return Err(Error::Usage(
+                    "legacy is upgrade-only; choose compact, balanced, or accurate".into(),
+                ));
+            }
+            Ok(Invocation::Model(ModelCommand::Install { yes, profile }))
         }
         _ => Err(Error::Usage(format!(
-            "unknown model command `{action}` (expected status or install)"
+            "unknown model command `{action}` (expected status, list, or install)"
         ))),
     }
 }
@@ -467,8 +522,8 @@ pub fn print_help() {
          Turn plain English into a shell command, locally.\n\n\
          USAGE:\n  howto [OPTIONS] <REQUEST...>\n  howto <COMMAND>\n\n\
          EXAMPLES:\n  howto \"free port 8080\"\n  howto find files larger than 1GB\n  howto -x show my current IP address\n\n\
-         COMMANDS:\n  setup [OPTIONS]              Download the model and configure HowTo\n  doctor                       Check setup, the model, and runtime\n  model status                 Inspect the local model\n  model install                Download and verify the local model\n  server status                Inspect the resident model server\n  server stop                  Stop the resident model server\n  shell status                 Inspect shell integration\n  shell enable [--shell SHELL] Enable shell integration\n  shell disable [--shell SHELL]\n                                Disable shell integration\n  shell init <zsh|bash|fish>   Print an embedded shell adapter\n  config                       Read or change configuration\n  help                         Show this help\n\n\
-         SETUP OPTIONS:\n  -y, --yes          Accept default-Yes prompts; never advisor/symlink consent\n      --no-shell     Complete setup and remove managed shell integration\n      --shell SHELL  Enable integration for zsh, bash, or fish\n\n\
+         COMMANDS:\n  setup [OPTIONS]              Download the model and configure HowTo\n  doctor                       Check setup, the model, and runtime\n  model list                   Compare local model profiles\n  model status                 Inspect the selected local model\n  model install [PROFILE]      Download and select a local model profile\n  server status                Inspect the resident embedded engine\n  server stop                  Stop the resident embedded engine\n  shell status                 Inspect shell integration\n  shell enable [--shell SHELL] Enable shell integration\n  shell disable [--shell SHELL]\n                                Disable shell integration\n  shell init <zsh|bash|fish>   Print an embedded shell adapter\n  config                       Read or change configuration\n  help                         Show this help\n\n\
+         SETUP OPTIONS:\n  -y, --yes          Accept default-Yes prompts; never advisor/symlink consent\n      --no-shell     Complete setup and remove managed shell integration\n      --shell SHELL  Enable integration for zsh, bash, or fish\n      --model TIER   Select compact, balanced, or accurate\n\n\
          OPTIONS:\n  -x, -e, --execute   Execute after an explicit confirmation\n  -c, --copy          Copy the generated command\n  -q, --quiet         Print only a no-known-risk command\n  -n, --count N       Generate up to N alternatives (1-8)\n      --json          Emit machine-readable output\n      --timing        Show generation timing\n  -h, --help          Show this help\n  -V, --version       Show the version\n\n\
          Nothing executes by default. DANGER and UNKNOWN commands cannot execute.",
         version = crate::VERSION
@@ -483,6 +538,7 @@ mod tests {
         parse, ConfigCommand, Invocation, ModelCommand, QueryOptions, ServerCommand, SetupOptions,
         ShellCommand,
     };
+    use crate::model_catalog::ModelProfile;
 
     fn args(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
@@ -540,6 +596,7 @@ mod tests {
                 yes: false,
                 no_shell: false,
                 shell: None,
+                model: None,
             })
         );
         assert_eq!(
@@ -548,8 +605,19 @@ mod tests {
                 yes: true,
                 no_shell: false,
                 shell: Some("fish".into()),
+                model: None,
             })
         );
+        assert_eq!(
+            parse(args(&["setup", "--model", "balanced", "--no-shell"])).unwrap(),
+            Invocation::Setup(SetupOptions {
+                yes: false,
+                no_shell: true,
+                shell: None,
+                model: Some(ModelProfile::Balanced),
+            })
+        );
+        assert!(parse(args(&["setup", "--model", "legacy"])).is_err());
         let Invocation::Query(query) = parse(args(&["setup", "a", "venv"])).unwrap() else {
             panic!("expected a natural-language query");
         };
@@ -641,6 +709,17 @@ mod tests {
         assert_eq!(
             parse(args(&["model", "install", "--help"])).unwrap(),
             Invocation::Help
+        );
+        assert_eq!(
+            parse(args(&["model", "list", "--json"])).unwrap(),
+            Invocation::Model(ModelCommand::List { json: true })
+        );
+        assert_eq!(
+            parse(args(&["model", "install", "accurate", "--yes"])).unwrap(),
+            Invocation::Model(ModelCommand::Install {
+                yes: true,
+                profile: Some(ModelProfile::Accurate),
+            })
         );
     }
 }

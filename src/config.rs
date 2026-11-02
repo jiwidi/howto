@@ -5,13 +5,47 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+use crate::model_catalog::ModelProfile;
 
-const CONFIG_SCHEMA: u32 = 1;
+pub const CONFIG_SCHEMA: u32 = 2;
+
+/// Accelerator selection for the embedded local engine.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Accelerator {
+    /// Use native acceleration when available, otherwise CPU.
+    #[default]
+    Auto,
+    /// Force the portable CPU backend (useful for headless/driver failures).
+    Cpu,
+}
+
+impl std::fmt::Display for Accelerator {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Auto => "auto",
+            Self::Cpu => "cpu",
+        })
+    }
+}
+
+impl std::str::FromStr for Accelerator {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "auto" => Ok(Self::Auto),
+            "cpu" => Ok(Self::Cpu),
+            _ => Err("expected auto or cpu".into()),
+        }
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub schema: u32,
+    pub model_profile: ModelProfile,
     pub model_path: Option<PathBuf>,
     pub llama_server_path: Option<PathBuf>,
     pub server_url: Option<String>,
@@ -19,6 +53,7 @@ pub struct Config {
     pub context_size: usize,
     pub max_tokens: usize,
     pub startup_timeout_seconds: u64,
+    pub accelerator: Accelerator,
     pub show_tab_hint: bool,
     pub failed_command_advisor: bool,
     pub shell_path: PathBuf,
@@ -29,6 +64,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             schema: CONFIG_SCHEMA,
+            model_profile: ModelProfile::Legacy,
             model_path: None,
             llama_server_path: None,
             server_url: None,
@@ -38,6 +74,7 @@ impl Default for Config {
             context_size: 2_048,
             max_tokens: 96,
             startup_timeout_seconds: 90,
+            accelerator: Accelerator::Auto,
             show_tab_hint: true,
             failed_command_advisor: false,
             shell_path: PathBuf::from(if cfg!(target_os = "macos") {
@@ -163,9 +200,28 @@ pub fn load(path: &Path) -> Result<Config> {
     let contents = fs::read(path).map_err(|error| {
         Error::Configuration(format!("could not read {}: {error}", path.display()))
     })?;
-    let config: Config = serde_json::from_slice(&contents).map_err(|error| {
+    let value: serde_json::Value = serde_json::from_slice(&contents).map_err(|error| {
         Error::Configuration(format!("could not parse {}: {error}", path.display()))
     })?;
+    let schema_one_has_profile = value.as_object().is_some_and(|object| {
+        object.get("schema").and_then(serde_json::Value::as_u64) == Some(1)
+            && object.contains_key("model_profile")
+    });
+    if schema_one_has_profile {
+        return Err(Error::Configuration(format!(
+            "could not parse {}: model_profile is not valid in config schema 1",
+            path.display()
+        )));
+    }
+    let mut config: Config = serde_json::from_value(value).map_err(|error| {
+        Error::Configuration(format!("could not parse {}: {error}", path.display()))
+    })?;
+    if config.schema == 1 {
+        // Schema 1 predates model selection. Preserve its exact behavior by keeping the legacy
+        // model, while normalizing the in-memory value so the next save emits schema 2.
+        config.schema = CONFIG_SCHEMA;
+        config.model_profile = ModelProfile::Legacy;
+    }
     config.validate()?;
     Ok(config)
 }
@@ -229,7 +285,8 @@ fn reject_symlink(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{load, save, Config};
+    use super::{load, save, Accelerator, Config};
+    use crate::model_catalog::ModelProfile;
 
     #[test]
     fn missing_config_uses_defaults() {
@@ -245,8 +302,78 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.json");
         std::fs::write(&path, br#"{"schema":1}"#).unwrap();
-        assert!(load(&path).unwrap().show_tab_hint);
-        assert!(!load(&path).unwrap().failed_command_advisor);
+        let config = load(&path).unwrap();
+        assert_eq!(config.schema, super::CONFIG_SCHEMA);
+        assert_eq!(config.model_profile, ModelProfile::Legacy);
+        assert_eq!(config.accelerator, Accelerator::Auto);
+        assert!(config.show_tab_hint);
+        assert!(!config.failed_command_advisor);
+    }
+
+    #[test]
+    fn schema_one_migration_preserves_all_existing_values() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        std::fs::write(
+            &path,
+            br#"{
+                "schema": 1,
+                "model_path": "/tmp/custom.gguf",
+                "llama_server_path": "/tmp/llama-server",
+                "server_url": null,
+                "threads": 3,
+                "context_size": 4096,
+                "max_tokens": 128,
+                "startup_timeout_seconds": 12,
+                "show_tab_hint": false,
+                "failed_command_advisor": true,
+                "shell_path": "/bin/bash",
+                "model_id": "custom:model/v1"
+            }"#,
+        )
+        .unwrap();
+
+        let config = load(&path).unwrap();
+        assert_eq!(config.schema, super::CONFIG_SCHEMA);
+        assert_eq!(config.model_profile, ModelProfile::Legacy);
+        assert_eq!(
+            config.model_path.as_deref(),
+            Some(std::path::Path::new("/tmp/custom.gguf"))
+        );
+        assert_eq!(
+            config.llama_server_path.as_deref(),
+            Some(std::path::Path::new("/tmp/llama-server"))
+        );
+        assert_eq!(config.threads, 3);
+        assert_eq!(config.context_size, 4096);
+        assert_eq!(config.max_tokens, 128);
+        assert_eq!(config.startup_timeout_seconds, 12);
+        assert_eq!(config.accelerator, Accelerator::Auto);
+        assert!(!config.show_tab_hint);
+        assert!(config.failed_command_advisor);
+        assert_eq!(config.shell_path, std::path::Path::new("/bin/bash"));
+        assert_eq!(config.model_id, "custom:model/v1");
+    }
+
+    #[test]
+    fn schema_one_cannot_smuggle_in_schema_two_fields() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        std::fs::write(&path, br#"{"schema":1,"model_profile":"accurate"}"#).unwrap();
+        let error = load(&path).unwrap_err().to_string();
+        assert!(error.contains("model_profile is not valid in config schema 1"));
+    }
+
+    #[test]
+    fn schema_two_model_profile_round_trips() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let config = Config {
+            model_profile: ModelProfile::Accurate,
+            ..Config::default()
+        };
+        save(&path, &config).unwrap();
+        assert_eq!(load(&path).unwrap(), config);
     }
 
     #[test]

@@ -10,10 +10,10 @@ howto shell status
 howto config list
 ```
 
-`--deep` reads and hashes a matching managed or packaged copy of the full
-default model, so it can take a little while. Custom models have no built-in
-expected digest. Commands return nonzero when the model is missing, default
-model deep verification fails, or `doctor` finds setup incomplete.
+`--deep` reads and hashes a matching managed or packaged catalog bundle, so it
+can take a little while. Custom models have no built-in expected digest.
+Commands return nonzero when the selected model is missing, deep verification
+fails, or `doctor` finds setup incomplete.
 
 ## Exit codes
 
@@ -23,7 +23,7 @@ model deep verification fails, or `doctor` finds setup incomplete.
 | `1` | Execution, filesystem, or JSON failure; also a negative status such as a missing model. |
 | `2` | Invalid CLI use or request. |
 | `3` | Configuration, dependency, or model problem. |
-| `4` | Server, network, provider-response, or generated-output problem. |
+| `4` | Embedded-engine, network, provider-response, or generated-output problem. |
 | other | Exit status of a command that you explicitly approved with `--execute`. |
 
 ## Homebrew cannot find HowTo
@@ -62,14 +62,19 @@ an instruction to run setup. `howto setup --yes` accepts default-Yes prompts
 for automation, while `--no-shell` disables and removes any HowTo-managed shell
 integration. `--yes` never opts in to the beta failed-command advisor or
 approves a startup symlink. Setup uses an existing verified model or configured
-provider and is safe to rerun after an interruption. If `setup.json` was
+provider and is safe to rerun after an interruption. Existing schema-1
+installations keep the `legacy` profile. When new profiles are qualified, use
+`--model compact|balanced|accurate` to make an explicit selection. If
+`setup.json` was
 truncated, explicit setup quarantines it as `setup.json.corrupt-*` and repairs
 onboarding; unsafe files and state from a newer incompatible HowTo version
 remain hard errors.
 
 ## The model is not installed
 
-`howto setup` asks before downloading about 940 MiB. For unattended setup, use:
+`howto setup` asks before downloading the selected profile. The only currently
+published catalog entry is the approximately 940 MiB legacy model. For
+unattended setup, use:
 
 ```sh
 howto setup --yes
@@ -77,7 +82,8 @@ howto model status --deep
 ```
 
 The installer needs the remaining model bytes plus 128 MiB of working space.
-An interrupted download stays as a `.part` file and is resumed on the next
+An interrupted download stays under
+`models/.install-<artifact-id>/<filename>.part` and is resumed on the next
 install attempt. Concurrent installers wait on a private lock instead of
 downloading twice. Resume responses must contain an exact `Content-Range`; an
 invalid range or HTTP 416 removes the partial, and the next install starts
@@ -85,9 +91,33 @@ again. A response that would exceed the pinned artifact size is rejected
 before the oversized chunk is written.
 
 If a resume repeatedly fails, inspect the model directory listed in
-[Privacy](../PRIVACY.md). Move the
-`nl2sh-1.5b-Q4_K_M.gguf.part` file aside, then retry. Do not replace the
+[Privacy](../PRIVACY.md). Preserve and move aside only the affected hidden
+`.install-<artifact-id>` staging directory, then retry. Do not replace a
 managed filename with an unverified download.
+
+## A Compact, Balanced, or Accurate model will not install
+
+Inspect the catalog and its machine-readable publication state:
+
+```sh
+howto model list
+howto model list --json
+```
+
+The three new tuned profiles are currently present for review but deliberately
+unpublished. Their research results are 63.75%, 67.75%, and 74.50% executable
+pass@1 respectively on one 400-task Linux/bash fold. The listed disk sizes are
+reference quantizations, and any latency or peak-memory figures came from BF16
+on an NVIDIA RTX 5090—not final GGUF measurements on a Mac or representative
+Linux host.
+
+Installation remains blocked until tuned-derivative redistribution is cleared
+and an immutable merged GGUF has an exact URL, size, SHA-256, verified prompt
+and stop contract, regression result, and Mac/Linux runtime qualification.
+`howto setup --model balanced` and `howto model install balanced` therefore
+return the catalog reason before downloading anything. This is not a network
+error. Continue using `legacy`; do not work around the gate by substituting an
+unreviewed artifact.
 
 ## Model verification failed
 
@@ -102,39 +132,33 @@ The initial managed download is verified before installation, but normal
 startup uses the pinned artifact's path and exact byte size for a fast check.
 `--deep` is the explicit full SHA-256 verification.
 
-If the deep check says `FAILED`, run `howto model install --yes`. Explicit managed
-installation hashes an existing artifact and replaces it when verification
-fails. You do not need to remove it manually.
+If the deep check says `FAILED`, run `howto model install --yes` for the current
+legacy release. Explicit managed installation hashes an existing artifact and
+replaces it when verification fails. You do not need to remove it manually.
 
 A custom `model_path` or `HOWTO_MODEL` is accepted when it is a regular GGUF
 larger than 1 MiB with a `GGUF` header. Stored config paths must be absolute;
 environment override paths are canonicalized. HowTo does not know that
 model's expected digest.
-`--deep` verifies only an artifact matching the built-in default manifest.
+`--deep` verifies only artifacts matching a published built-in catalog entry.
 Verify custom models against their publisher's signed metadata.
 
-## `llama-server` was not found
+## An old config mentions `llama-server`
 
-Homebrew installation should supply it as the `llama.cpp` dependency. Repair
-or locate it with:
-
-```sh
-brew install llama.cpp
-command -v llama-server
-```
-
-If it exists outside `PATH`, configure the full executable path:
+Current local inference is compiled into `howto`; installing or configuring
+`llama-server` is unnecessary. The schema-1 `llama_server_path` setting and
+`HOWTO_LLAMA_SERVER` environment variable are deprecated and ignored locally.
+You may clean them up after upgrading:
 
 ```sh
-howto config set llama_server_path "$(brew --prefix llama.cpp)/bin/llama-server"
+howto config unset llama_server_path
+unset HOWTO_LLAMA_SERVER
 howto doctor
 ```
 
-Resolution order is `HOWTO_LLAMA_SERVER`, `llama_server_path`, `PATH`, then
-well-known Homebrew and system paths. The selected file must exist and be
-executable, and its resolved filename must be `llama-server`. `howto doctor` also
-runs `llama-server --version` with a 30-second deadline; a failed probe keeps
-local readiness false. Run a harmless query to test model loading and inference.
+`howto server status` can report an old HowTo-managed `llama-server` process
+left from the previous architecture. `howto server stop` validates ownership
+and cleans up that legacy process as well as the current embedded engine.
 
 ## Tab does not insert the generated command
 
@@ -211,7 +235,7 @@ the current shell. If `howto shell status` reports that the shell integration
 itself is inactive or out of date, run `howto shell enable` and open a new
 terminal.
 
-The advisor requires active shell integration, the managed local model
+The advisor requires active shell integration, the embedded local model
 (`server_url` must be `null`), and zsh, fish, or Bash 5.1 and newer. Bash
 4.1–5.0 supports Tab insertion but not failed-command advice. A configured provider never
 receives failed command text or exit status; the advisor remains unavailable
@@ -225,7 +249,7 @@ trigger the advisor. HowTo passes its raw text and exit status to the local
 model, so it cannot use command output or inspect the working directory,
 environment, or files when forming the suggestion. Local generation may delay
 the next prompt by up to 20 seconds. If another terminal is changing the model
-server or that deadline is exhausted, HowTo skips the optional suggestion.
+engine or that deadline is exhausted, HowTo skips the optional suggestion.
 
 Eligibility is intentionally conservative. The command must be one literal
 external invocation no longer than 4096 bytes and exit with status 1–127.
@@ -242,39 +266,49 @@ howto config set failed_command_advisor false
 HowTo never executes, copies, inserts, or stages an advisor suggestion. Review
 the printed command as untrusted text before typing or running anything.
 
-## The local server does not start
+## The embedded engine does not start
 
-First stop any recorded managed process and retry:
+First stop any recorded engine (and any legacy managed process) and retry:
 
 ```sh
 howto server stop
 howto "show my current directory"
 ```
 
-HowTo includes the last several runtime-log lines in startup errors. The full
+HowTo includes the last several engine-log lines in startup errors. The full
 log is normally:
 
-- macOS: `~/Library/Logs/HowTo/llama-server.log`
-- Linux: `${XDG_STATE_HOME:-~/.local/state}/howto/log/llama-server.log`
-- `HOWTO_HOME`: `$HOWTO_HOME/logs/llama-server.log`
+- macOS: `~/Library/Logs/HowTo/engine.log`
+- Linux: `${XDG_STATE_HOME:-~/.local/state}/howto/log/engine.log`
+- `HOWTO_HOME`: `$HOWTO_HOME/logs/engine.log`
 
-If `server.json` is malformed, HowTo quarantines it beside the original as a
-timestamped `server.json.corrupt-*` file, cleans the related live-state files,
+If `engine.json` is malformed, HowTo quarantines it beside the original as a
+timestamped `engine.json.corrupt-*` file, cleans the related live-state files,
 and prints a warning. Preserve that file only if it is useful for a sanitized
 bug report.
 
-Common causes are an incompatible `llama-server`, an invalid custom model,
-insufficient memory, or a startup deadline that is too short. For a slow
-machine, increase the deadline within its 1–600 second range:
+Common causes are an invalid/incompatible GGUF, insufficient memory, an
+accelerator initialization problem, or a startup deadline that is too short.
+For a slow machine, increase the deadline within its 1–600 second range:
 
 ```sh
 howto config set startup_timeout_seconds 180
 ```
 
-The managed runtime uses the `llama-server` CLI installed by Homebrew. A future
-llama.cpp release can change flags or GGUF compatibility independently of
-HowTo. Include both `howto --version` and `llama-server --version` in a
-sanitized bug report.
+If the log reports a GPU or Metal initialization/context failure, force the
+portable CPU path and retry. This preference is fingerprinted, so HowTo
+restarts the resident worker with the requested backend:
+
+```sh
+howto config set accelerator cpu
+```
+
+Restore automatic acceleration later with `howto config unset accelerator`.
+
+The native llama.cpp revision is locked into the HowTo build, so include
+`howto --version`, the platform/architecture, selected profile, and the
+sanitized engine-log tail in a report. A custom model may require a newer GGUF
+architecture or prompt template than that release supports.
 
 ## The Unix socket path is too long
 
@@ -287,7 +321,7 @@ local authentication and process state.
 
 ## Server status says stopped
 
-The model server starts lazily on a query. A stopped result before the first
+The embedded model engine starts lazily on a query. A stopped result before the first
 query is normal:
 
 ```sh
@@ -295,12 +329,13 @@ howto "show my current directory"
 howto server status
 ```
 
-The managed runtime is configured to sleep after 15 minutes idle. Use
+The embedded worker exits after 15 minutes idle. Use
 `howto server stop` when you need to release it immediately. `server status`
-describes only the managed local process; it does not probe a configured
+describes only the local embedded engine; it does not probe a configured
 provider. Status checks serialize with lifecycle changes; normal query reuse
-allows a waking managed server up to three health attempts before replacing
-it.
+allows a waking engine up to three health attempts before replacing it. If it
+reports a legacy `llama-server`, run `howto server stop` once to clean up the
+pre-upgrade process.
 
 ## A configured provider fails
 
@@ -450,9 +485,14 @@ howto config unset KEY
 
 Numeric settings are range-checked, including `max_tokens < context_size`.
 Provider URL shapes, model IDs, and execution-shell names are validated.
-Config schema 0, future schemas, and unknown keys are refused. Stored model,
-runtime, and shell paths and `HOWTO_HOME` must be absolute. HowTo will not
-read a symlinked config file or use a data directory owned by another user.
+Current schema 2 includes `model_profile`; schema 1 loads as schema 2 with the
+`legacy` profile, while schema 0, future schemas, and unknown keys are refused.
+Select profiles with `howto setup --model ...` or `howto model install ...`,
+not `config set model_profile`, so the model is verified before selection.
+Stored model and shell paths and `HOWTO_HOME` must be absolute. The deprecated
+`llama_server_path` is still accepted for migration but ignored locally. HowTo
+will not read a symlinked config file or use a data directory owned by another
+user.
 
 ## Preparing a bug report
 
@@ -467,6 +507,6 @@ howto server status --json
 
 Add `--deep` only when model integrity is relevant. Redact usernames, private
 paths, endpoint URLs, prompts, generated commands, and runtime logs before
-posting. Never include `HOWTO_API_KEY`, the managed `server.key`, or another
+posting. Never include `HOWTO_API_KEY`, the private `engine.key`, or another
 secret. Report vulnerabilities privately as described in
 [SECURITY.md](../SECURITY.md).

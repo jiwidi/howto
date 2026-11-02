@@ -5,7 +5,7 @@ must travel with a source release, binary archive, Homebrew bottle, or other
 redistribution. It complements [LICENSE](../LICENSE) and [NOTICE](../NOTICE); it
 does not replace the license text for any component.
 
-The inventory reflects the project as audited on 2026-08-10. Update it whenever
+The inventory reflects the project as audited on 2026-08-15. Update it whenever
 the model, inference runtime, copied upstream code, or dependency set changes.
 
 ## Component inventory
@@ -16,7 +16,8 @@ the model, inference runtime, copied upstream code, or dependency set changes.
 | [nl2sh-1.5b-Q4_K_M](https://huggingface.co/ThorOdinson246/nl2sh-1.5b-Q4_K_M) | Default local command-generation weights | Apache-2.0, as declared by the model author | Ship the Apache-2.0 license and model/provenance notices when the weights are bundled or redistributed. |
 | [Qwen2.5-Coder-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct) | Base model from which nl2sh-1.5b was fine-tuned | Apache-2.0; Copyright 2024 Alibaba Cloud | Retain the base-model copyright and Apache-2.0 terms. |
 | [tldr-pages](https://github.com/tldr-pages/tldr) page content | Reported source of 23.1% of the fine-tuning rows | CC-BY-4.0; Copyright 2014-present the tldr-pages team and contributors | Credit the project and contributors, link the material and license, and state how the material was transformed. Do not imply endorsement. |
-| [llama.cpp](https://github.com/ggml-org/llama.cpp) | Local GGUF inference runtime | MIT; Copyright 2023-2026 The ggml authors | A distribution that bundles the runtime must carry its copyright and MIT permission notice. |
+| [llama-cpp-rs](https://github.com/utilityai/llama-cpp-rs) | Rust bindings used by HowTo's embedded inference engine | MIT OR Apache-2.0; Copyright Dial AI | HowTo distributes the bindings under their MIT option and carries that notice in the generated license bundle. |
+| [llama.cpp](https://github.com/ggml-org/llama.cpp) and ggml | Native GGUF inference code statically compiled into `howto` | MIT; Copyright 2023-2026 The ggml authors | Every HowTo binary distribution must carry the full copyright and MIT permission notice. |
 | [Locked Rust packages](../THIRD_PARTY_LICENSES.txt) | Libraries compiled into or used to build HowTo | Package-specific; generated from `Cargo.lock` | Ship and keep the generated dependency license/notice bundle current with the lockfile. |
 
 HowTo is independent of these projects. Their names are used only to describe
@@ -114,12 +115,22 @@ redistributes those resulting weights without changing the weights. HowTo's
 packaging, prompt, inference client, and safety layer are separate modifications
 and do not imply endorsement by tldr-pages or its contributors.
 
-## llama.cpp MIT notice
+## Embedded llama.cpp/ggml runtime and Rust bindings
 
-The following notice must accompany any HowTo artifact that bundles a
-llama.cpp executable or substantial portion of llama.cpp. When Homebrew installs
-llama.cpp as a separate dependency, its own keg carries the license, but keeping
-this attribution in HowTo's documentation remains useful.
+HowTo uses `llama-cpp-2` and `llama-cpp-sys-2` 0.1.154 from
+[`utilityai/llama-cpp-rs@bed81ad4ab1a6c904b11d425608e50f976d8ea62`](https://github.com/utilityai/llama-cpp-rs/tree/bed81ad4ab1a6c904b11d425608e50f976d8ea62).
+That wrapper revision vendors
+[`ggml-org/llama.cpp@5f55650a78f92aff4d48d671423e888fac0469ff`](https://github.com/ggml-org/llama.cpp/tree/5f55650a78f92aff4d48d671423e888fac0469ff).
+The native runtime is statically compiled into the `howto` executable; users
+do not need a separate `llama-server` or `llama.cpp` installation.
+
+The crates.io packages omit their repository license files from the published
+crate include lists. `scripts/generate-third-party-licenses.py` therefore uses
+pinned fallback copies of the wrapper's selected MIT notice and the vendored
+llama.cpp/ggml MIT notice. Both appear in `THIRD_PARTY_LICENSES.txt`, which is
+installed by Homebrew and included in every native release archive.
+
+The following llama.cpp/ggml notice accompanies all HowTo binaries:
 
 ```text
 MIT License
@@ -153,7 +164,8 @@ Before publishing a source archive, GitHub release, or Homebrew bottle:
   `THIRD_PARTY_LICENSES.txt` in installed and release documentation;
 - pin and verify the exact model revision, byte size, and SHA-256;
 - include the model and Qwen notices if the model is present in the artifact;
-- include the full llama.cpp MIT notice if the runtime is present;
+- include the full llama-cpp-rs and llama.cpp/ggml MIT notices with every
+  binary, because the runtime is compiled into `howto`;
 - preserve change notices on source or tests adapted from whatisit;
 - regenerate and review `THIRD_PARTY_LICENSES.txt` from the exact `Cargo.lock`
   and run the freshness check;

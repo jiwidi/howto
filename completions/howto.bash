@@ -22,17 +22,21 @@ _howto() {
   elif [[ $first == setup && $COMP_CWORD -ge 2 ]]; then
     if [[ $previous == --shell ]]; then
       _howto_complete_words "zsh bash fish" "$current"
+    elif [[ $previous == --model ]]; then
+      _howto_complete_words "compact balanced accurate" "$current"
     else
-      _howto_complete_words "-y --yes --no-shell --shell --help" "$current"
+      _howto_complete_words "-y --yes --model --no-shell --shell --help" "$current"
     fi
   elif [[ $first == doctor && $COMP_CWORD -eq 2 ]]; then
     _howto_complete_words "--json --deep" "$current"
   elif [[ $first == model && $COMP_CWORD -eq 2 ]]; then
-    _howto_complete_words "status install --json --deep --help" "$current"
+    _howto_complete_words "status list install --json --deep --help" "$current"
   elif [[ $first == model && $second == status ]]; then
     _howto_complete_words "--json --deep" "$current"
+  elif [[ $first == model && $second == list ]]; then
+    _howto_complete_words "--json" "$current"
   elif [[ $first == model && $second == install ]]; then
-    _howto_complete_words "-y --yes" "$current"
+    _howto_complete_words "compact balanced accurate -y --yes" "$current"
   elif [[ $first == server && $COMP_CWORD -eq 2 ]]; then
     _howto_complete_words "status stop --json --help" "$current"
   elif [[ $first == server && ( $second == status || $second == stop ) ]]; then
@@ -55,12 +59,15 @@ _howto() {
     _howto_complete_words "--json" "$current"
   elif [[ $first == config && ( $second == get || $second == set || $second == unset ) && $COMP_CWORD -eq 3 ]]; then
     _howto_complete_words \
-      "model_path llama_server_path server_url threads context_size max_tokens startup_timeout_seconds show_tab_hint failed_command_advisor shell_path model_id" \
+      "model_profile model_path llama_server_path server_url threads context_size max_tokens startup_timeout_seconds accelerator show_tab_hint failed_command_advisor shell_path model_id" \
       "$current"
   elif [[ $first == config && $second == set \
     && ( ${COMP_WORDS[3]} == show_tab_hint || ${COMP_WORDS[3]} == failed_command_advisor ) \
     && $COMP_CWORD -eq 4 ]]; then
     _howto_complete_words "true false" "$current"
+  elif [[ $first == config && $second == set && ${COMP_WORDS[3]} == accelerator \
+    && $COMP_CWORD -eq 4 ]]; then
+    _howto_complete_words "auto cpu" "$current"
   fi
 }
 
