@@ -20,7 +20,7 @@ use fs2::FileExt;
 use nix::errno::Errno;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::{Pid, Uid};
-use rand::RngCore;
+use rand::Rng;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

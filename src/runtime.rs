@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use fs2::FileExt;
 use nix::sys::signal::{self, Signal};
 use nix::unistd::{Pid, Uid};
-use rand::RngCore;
+use rand::Rng;
 use reqwest::blocking::{Client, RequestBuilder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
