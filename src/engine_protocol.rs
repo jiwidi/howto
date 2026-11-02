@@ -244,9 +244,7 @@ impl GenerateRequest {
 impl EngineResponse {
     pub fn validate(&self) -> Result<()> {
         match self {
-            Self::Generated(response)
-                if response.content.len() > MAX_GENERATED_CONTENT_BYTES =>
-            {
+            Self::Generated(response) if response.content.len() > MAX_GENERATED_CONTENT_BYTES => {
                 Err(Error::Server(
                     "embedded engine generation is unexpectedly large".into(),
                 ))
@@ -265,8 +263,8 @@ mod tests {
 
     use super::{
         read_frame, write_frame, ChatMessage, ChatRole, EngineCommand, EngineRequest,
-        EngineResponse, FinishReason, GenerateRequest, GenerateResponse,
-        ENGINE_PROTOCOL_SCHEMA, MAX_FRAME_BYTES, MAX_GENERATED_CONTENT_BYTES,
+        EngineResponse, FinishReason, GenerateRequest, GenerateResponse, ENGINE_PROTOCOL_SCHEMA,
+        MAX_FRAME_BYTES, MAX_GENERATED_CONTENT_BYTES,
     };
 
     fn request() -> EngineRequest {

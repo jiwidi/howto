@@ -700,9 +700,7 @@ fn token_piece(model: &LlamaModel, token: LlamaToken) -> Result<Vec<u8>, Embedde
 
 fn append_token_piece(output: &mut Vec<u8>, piece: &[u8]) -> Result<(), EmbeddedError> {
     if output.len().saturating_add(piece.len()) > MAX_GENERATED_CONTENT_BYTES {
-        return Err(EmbeddedError::OutputTooLarge(
-            MAX_GENERATED_CONTENT_BYTES,
-        ));
+        return Err(EmbeddedError::OutputTooLarge(MAX_GENERATED_CONTENT_BYTES));
     }
     output.extend_from_slice(piece);
     Ok(())
