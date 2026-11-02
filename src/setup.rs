@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 use crate::paths::Paths;
 
 const SETUP_SCHEMA: u32 = 1;
-pub const SHELL_INTEGRATION_SCHEMA: u32 = 1;
+pub const SHELL_INTEGRATION_SCHEMA: u32 = 2;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -23,6 +23,8 @@ pub struct Receipt {
     pub shell_integration_schema: Option<u32>,
     #[serde(default)]
     pub shell_startup_files: Vec<PathBuf>,
+    #[serde(default)]
+    pub failed_command_advisor_prompted: bool,
 }
 
 impl Receipt {
@@ -37,6 +39,7 @@ impl Receipt {
             shell: shell.map(str::to_owned),
             shell_integration_schema: shell.map(|_| SHELL_INTEGRATION_SCHEMA),
             shell_startup_files: Vec::new(),
+            failed_command_advisor_prompted: false,
         }
     }
 
@@ -310,6 +313,20 @@ mod tests {
     }
 
     #[test]
+    fn older_receipt_defaults_beta_consent_to_not_prompted() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = Paths::under(directory.path().to_path_buf());
+        paths.create().unwrap();
+        fs::write(
+            paths.setup_state_file(),
+            br#"{"schema":1,"completed_at":1,"shell":"zsh","shell_integration_schema":1,"shell_startup_files":[]}"#,
+        )
+        .unwrap();
+        let receipt = load(&paths).unwrap().unwrap();
+        assert!(!receipt.failed_command_advisor_prompted);
+    }
+
+    #[test]
     fn receipt_requires_absolute_owned_startup_paths() {
         let directory = tempfile::tempdir().unwrap();
         let paths = Paths::under(directory.path().to_path_buf());
@@ -357,13 +374,13 @@ mod tests {
         assert!(load(&paths).is_err());
         fs::write(
             paths.setup_state_file(),
-            br#"{"schema":1,"completed_at":1,"shell":"zsh","shell_integration_schema":2}"#,
+            br#"{"schema":1,"completed_at":1,"shell":"zsh","shell_integration_schema":3}"#,
         )
         .unwrap();
         assert!(load(&paths).is_err());
         fs::write(
             paths.setup_state_file(),
-            br#"{"schema":1,"completed_at":1,"shell":null,"shell_integration_schema":2}"#,
+            br#"{"schema":1,"completed_at":1,"shell":null,"shell_integration_schema":3}"#,
         )
         .unwrap();
         assert!(load(&paths).is_err());

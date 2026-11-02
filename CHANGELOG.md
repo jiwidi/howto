@@ -12,6 +12,21 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until
 
 - Add the `show_tab_hint` configuration setting, defaulting to `true`, so users
   can hide only the post-query Tab reminder without disabling Tab insertion.
+- Add a beta failed-command advisor for zsh, fish, and Bash 5.1 or newer. It is
+  separately opt-in, defaults to disabled, sends only raw command text and exit
+  status to the managed local model, and prints a suggested replacement.
+
+### Security
+
+- Keep the failed-command advisor unavailable with configured providers and
+  verify consent before the adapter sends failed-command text, then verify it
+  again before the application reads the command. Its suggestions are never
+  executed, copied, inserted into the editable buffer, or staged for the Tab
+  shortcut. `--yes` and non-interactive setup do not imply consent. Runtime
+  acquisition is nonblocking and shares a bounded 20-second deadline with
+  advisor inference. Automatic shell calls pin the executable, session, state,
+  model, and runtime selection at adapter activation so later environment
+  changes cannot redirect command text.
 
 ## [0.2.0] - 2026-08-12
 

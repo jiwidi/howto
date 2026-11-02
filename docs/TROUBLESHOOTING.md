@@ -58,12 +58,14 @@ howto setup
 
 An interactive query offers to run it. Piped input, JSON, quiet mode, and other
 non-interactive requests never prompt or start a large download; they exit with
-an instruction to run setup. `howto setup --yes` accepts setup prompts for
-automation, while `--no-shell` disables and removes any HowTo-managed Tab
-integration. Setup uses an existing verified model or configured provider and
-is safe to rerun after an interruption. If `setup.json` was truncated, explicit
-setup quarantines it as `setup.json.corrupt-*` and repairs onboarding; unsafe
-files and state from a newer incompatible HowTo version remain hard errors.
+an instruction to run setup. `howto setup --yes` accepts default-Yes prompts
+for automation, while `--no-shell` disables and removes any HowTo-managed shell
+integration. `--yes` never opts in to the beta failed-command advisor or
+approves a startup symlink. Setup uses an existing verified model or configured
+provider and is safe to rerun after an interruption. If `setup.json` was
+truncated, explicit setup quarantines it as `setup.json.corrupt-*` and repairs
+onboarding; unsafe files and state from a newer incompatible HowTo version
+remain hard errors.
 
 ## The model is not installed
 
@@ -186,6 +188,60 @@ The pending command is still available at the next empty prompt. Restore the
 default reminder with `howto config unset show_tab_hint` or explicitly set the
 value to `true`.
 
+## The failed-command advisor does not appear
+
+The beta advisor is disabled by default. Inspect the preference, provider mode,
+and shell integration:
+
+```sh
+howto config get failed_command_advisor
+howto config get server_url
+howto shell status
+```
+
+Enable it explicitly with:
+
+```sh
+howto config set failed_command_advisor true
+```
+
+The managed adapter checks the setting again before sending failed command
+text, so enabling or disabling it takes effect on the next eligible failure in
+the current shell. If `howto shell status` reports that the shell integration
+itself is inactive or out of date, run `howto shell enable` and open a new
+terminal.
+
+The advisor requires active shell integration, the managed local model
+(`server_url` must be `null`), and zsh, fish, or Bash 5.1 and newer. Bash
+4.1–5.0 supports Tab insertion but not failed-command advice. A configured provider never
+receives failed command text or exit status; the advisor remains unavailable
+rather than falling back to that provider. The two settings are mutually
+exclusive: disable `failed_command_advisor` before setting `server_url`. On
+Bash, interactive command history must also be enabled; HowTo reads the current
+command from that existing history without creating another one.
+
+Only a command entered at an interactive prompt that exits unsuccessfully can
+trigger the advisor. HowTo passes its raw text and exit status to the local
+model, so it cannot use command output or inspect the working directory,
+environment, or files when forming the suggestion. Local generation may delay
+the next prompt by up to 20 seconds. If another terminal is changing the model
+server or that deadline is exhausted, HowTo skips the optional suggestion.
+
+Eligibility is intentionally conservative. The command must be one literal
+external invocation no longer than 4096 bytes and exit with status 1–127.
+Pipelines, redirects, expansions, wrappers, builtins, control characters,
+leading whitespace, and secret-like text are skipped. These privacy filters are
+not proof that every sensitive value will be detected.
+
+To turn off automatic suggestions without removing Tab insertion:
+
+```sh
+howto config set failed_command_advisor false
+```
+
+HowTo never executes, copies, inserts, or stages an advisor suggestion. Review
+the printed command as untrusted text before typing or running anything.
+
 ## The local server does not start
 
 First stop any recorded managed process and retry:
@@ -256,6 +312,11 @@ howto config set server_url https://provider.example
 howto config set model_id provider-model-name
 export HOWTO_API_KEY='...'
 ```
+
+The beta failed-command advisor is intentionally unavailable in this mode and
+does not send failed command text or exit status to the configured endpoint.
+Configuration rejects `server_url` while `failed_command_advisor` is true, so
+disable the advisor first. This does not affect explicit HowTo queries.
 
 The server must accept the chat messages plus `max_tokens`, `temperature`,
 `top_p`, `n`, `repeat_penalty`, `repeat_last_n`, `stop`, and `stream`.

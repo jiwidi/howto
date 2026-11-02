@@ -27,9 +27,9 @@ release, and credit the reporter when requested and appropriate.
 
 ## Security model
 
-HowTo treats four inputs as untrusted:
+HowTo treats these inputs as untrusted:
 
-1. the natural-language request;
+1. the natural-language request or failed-command text;
 2. output from the model or a configured provider;
 3. downloaded model and runtime artifacts; and
 4. local configuration and runtime state that may have been tampered with.
@@ -42,6 +42,19 @@ The default path applies the following controls:
 - Tab integration is opt-in during setup, makes only `NO_KNOWN_RISK` and
   `CAUTION` results available, stores at most one private command per shell
   session, and inserts it only into an empty editable buffer without submitting;
+- the beta failed-command advisor is disabled by default and requires a separate,
+  default-No interactive opt-in that `--yes` does not imply. It sends only raw
+  command text and exit status to the managed local model, is unavailable when
+  `server_url` is configured, and prints suggestions without executing, copying,
+  inserting, or staging them;
+- advisor eligibility is limited to one short, literal external command with a
+  non-signal failure status. Compound syntax, expansions, wrappers, builtins,
+  control characters, leading whitespace, and secret-like text are rejected
+  before inference;
+- the shell adapter pins HowTo's executable, session, state paths, model and
+  managed-runtime selection when it loads, and uses a clean bounded environment
+  for automatic calls so later project-local environment changes cannot
+  redirect failed-command text or pending Tab state;
 - `--quiet` emits only a `NO_KNOWN_RISK` result;
 - model output containing terminal control bytes, multiple lines, malformed
   fences, excessive length, or a token-limit finish is rejected;
@@ -101,6 +114,12 @@ gate after the user presses Enter. The adapter never submits the line, and it
 does not offer `DANGER` or `UNKNOWN` results, but inserted commands remain
 untrusted and must be reviewed before execution.
 
+Failed-command advisor output is likewise untrusted. Automatic invocation of
+the local model is not permission to run its response: the advisor only prints
+the suggestion and never puts it in the editable command buffer or pending Tab
+state. It cannot know the command's output, current directory, environment, or
+file contents, so a plausible suggestion can still be irrelevant or harmful.
+
 Setup installs a small, auditable adapter in HowTo's private data directory and
 adds a marked source block to the selected shell startup file(s). Bash uses
 `.bashrc` plus its active login file. HowTo refuses unsafe or malformed files,
@@ -108,8 +127,11 @@ writes changes atomically, backs up each existing file, and records the exact
 managed paths for reliable cleanup. A symlink in the startup path is followed
 only when its canonical target, path ownership, and permissions pass validation
 and the user separately approves the displayed path, target, and exact block in
-an interactive terminal; `--yes` does not grant that approval. Disable the hook
-with `howto shell disable`.
+an interactive terminal; `--yes` does not grant that approval. The failed-
+command advisor has its own default-No consent after compatible shell
+integration is active, and `--yes` does not grant that approval either. Disable
+the advisor with `howto config set failed_command_advisor false`, or remove all
+managed hooks with `howto shell disable`.
 
 ## Provider and transport security
 
@@ -117,6 +139,11 @@ Setting `server_url` changes the trust and privacy boundary. HowTo sends the
 request and its system prompt to that endpoint and trusts it to implement
 `POST /v1/chat/completions`. A `HOWTO_API_KEY`, when present, is sent as a
 bearer token.
+
+The beta failed-command advisor never uses a configured provider. When
+`server_url` is set, advisor inference is unavailable and configuration
+validation prevents the advisor from being enabled. Failed commands and exit
+statuses are therefore not sent to that endpoint.
 
 - Prefer `https://` for remote endpoints and
   `unix:///absolute/socket/path` for same-host endpoints.

@@ -61,6 +61,8 @@ pub enum ShellCommand {
     Disable { shell: Option<String> },
     Status { json: bool },
     Take,
+    AdvisorReady,
+    Advise { status: u16 },
 }
 
 pub fn run_from_env() -> Result<i32> {
@@ -131,7 +133,7 @@ pub fn parse(arguments: impl IntoIterator<Item = OsString>) -> Result<Invocation
             if arguments.get(1).is_some_and(|argument| {
                 matches!(
                     argument.as_str(),
-                    "init" | "enable" | "disable" | "status" | "take"
+                    "init" | "enable" | "disable" | "status" | "take" | "advisor-ready" | "advise"
                 ) || argument.starts_with('-')
             }) =>
         {
@@ -441,6 +443,18 @@ fn parse_shell(arguments: &[String]) -> Result<Invocation> {
             _ => Err(Error::Usage("usage: howto shell status [--json]".into())),
         },
         "take" if rest.is_empty() => Ok(Invocation::Shell(ShellCommand::Take)),
+        "advisor-ready" if rest.is_empty() => Ok(Invocation::Shell(ShellCommand::AdvisorReady)),
+        "advise" => match rest {
+            [flag, status] if flag == "--status" => {
+                let status = status.parse::<u16>().map_err(|_| {
+                    Error::Usage("usage: howto shell advise --status <0-65535>".into())
+                })?;
+                Ok(Invocation::Shell(ShellCommand::Advise { status }))
+            }
+            _ => Err(Error::Usage(
+                "usage: howto shell advise --status <0-65535>".into(),
+            )),
+        },
         _ => Err(Error::Usage(format!(
             "unknown shell command `{action}` (expected init, enable, disable, or status)"
         ))),
@@ -453,8 +467,8 @@ pub fn print_help() {
          Turn plain English into a shell command, locally.\n\n\
          USAGE:\n  howto [OPTIONS] <REQUEST...>\n  howto <COMMAND>\n\n\
          EXAMPLES:\n  howto \"free port 8080\"\n  howto find files larger than 1GB\n  howto -x show my current IP address\n\n\
-         COMMANDS:\n  setup [OPTIONS]              Download the model and configure HowTo\n  doctor                       Check setup, the model, and runtime\n  model status                 Inspect the local model\n  model install                Download and verify the local model\n  server status                Inspect the resident model server\n  server stop                  Stop the resident model server\n  shell status                 Inspect the Tab integration\n  shell enable [--shell SHELL] Enable the Tab integration\n  shell disable [--shell SHELL]\n                                Disable the Tab integration\n  shell init <zsh|bash|fish>   Print an embedded shell adapter\n  config                       Read or change configuration\n  help                         Show this help\n\n\
-         SETUP OPTIONS:\n  -y, --yes          Accept setup prompts\n      --no-shell     Complete setup and remove managed shell integration\n      --shell SHELL  Enable integration for zsh, bash, or fish\n\n\
+         COMMANDS:\n  setup [OPTIONS]              Download the model and configure HowTo\n  doctor                       Check setup, the model, and runtime\n  model status                 Inspect the local model\n  model install                Download and verify the local model\n  server status                Inspect the resident model server\n  server stop                  Stop the resident model server\n  shell status                 Inspect shell integration\n  shell enable [--shell SHELL] Enable shell integration\n  shell disable [--shell SHELL]\n                                Disable shell integration\n  shell init <zsh|bash|fish>   Print an embedded shell adapter\n  config                       Read or change configuration\n  help                         Show this help\n\n\
+         SETUP OPTIONS:\n  -y, --yes          Accept default-Yes prompts; never advisor/symlink consent\n      --no-shell     Complete setup and remove managed shell integration\n      --shell SHELL  Enable integration for zsh, bash, or fish\n\n\
          OPTIONS:\n  -x, -e, --execute   Execute after an explicit confirmation\n  -c, --copy          Copy the generated command\n  -q, --quiet         Print only a no-known-risk command\n  -n, --count N       Generate up to N alternatives (1-8)\n      --json          Emit machine-readable output\n      --timing        Show generation timing\n  -h, --help          Show this help\n  -V, --version       Show the version\n\n\
          Nothing executes by default. DANGER and UNKNOWN commands cannot execute.",
         version = crate::VERSION
@@ -561,6 +575,21 @@ mod tests {
             panic!("expected a natural-language query");
         };
         assert_eq!(query.words[0], "shell");
+    }
+
+    #[test]
+    fn parses_internal_failed_command_advisor() {
+        assert_eq!(
+            parse(args(&["shell", "advisor-ready"])).unwrap(),
+            Invocation::Shell(ShellCommand::AdvisorReady)
+        );
+        assert!(parse(args(&["shell", "advisor-ready", "unexpected"])).is_err());
+        assert_eq!(
+            parse(args(&["shell", "advise", "--status", "127"])).unwrap(),
+            Invocation::Shell(ShellCommand::Advise { status: 127 })
+        );
+        assert!(parse(args(&["shell", "advise", "127"])).is_err());
+        assert!(parse(args(&["shell", "advise", "--status", "nope"])).is_err());
     }
 
     #[test]

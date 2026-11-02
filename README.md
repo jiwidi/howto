@@ -40,15 +40,16 @@ macOS users should prefer the Homebrew source install. Standalone archives do
 not bundle `llama-server` or the model.
 
 Run setup once after installation. It verifies the runtime, downloads the
-pinned local model (about 940 MiB), and optionally enables context-aware Tab
-insertion for zsh, Bash, or fish. The download can resume and is installed only
-after its size and SHA-256 digest match the built-in manifest:
+pinned local model (about 940 MiB), and optionally enables shell integration
+for zsh, Bash, or fish. The download can resume and is installed only after its
+size and SHA-256 digest match the built-in manifest:
 
 ```console
 $ howto setup
 Runtime found at /opt/homebrew/bin/llama-server.
 Download the local model (940 MiB)? [Y/n]
 Enable Tab to insert your last generated command at an empty prompt? [Y/n]
+Enable the beta failed-command advisor? It sends only raw failed-command text and its exit status to the managed local model, then prints a suggestion without running it. [y/N]
 HowTo setup is complete.
 ```
 
@@ -58,6 +59,11 @@ Open a new terminal after enabling the integration. For unattended setup, use:
 howto setup --yes
 howto doctor --deep
 ```
+
+`--yes` accepts the default-Yes setup prompts, but it never opts in to the
+failed-command advisor or approves a shell startup symlink. Non-interactive
+setup leaves the advisor disabled; enable it later with an explicit config
+command if desired.
 
 HowTo writes a marked source block to the selected shell's startup file(s) and
 stores the embedded adapter in its private data directory. Bash uses both
@@ -80,6 +86,12 @@ startup path contains a safe symlink, interactive setup shows the path, resolved
 target, and exact managed block in a separate default-No approval prompt;
 `--yes` never bypasses that review. An explicit `--shell` request remains
 strict and fails outside an interactive terminal instead of following a link.
+
+After compatible shell integration is successfully configured, interactive
+setup separately offers the beta failed-command advisor with a default answer
+of No. The advisor is available only with the managed local model, and only for
+zsh, fish, or Bash 5.1 and newer. It is not offered when `server_url` selects a
+configured provider.
 
 The model is downloaded from Hugging Face; prompts are not sent there.
 
@@ -124,6 +136,53 @@ howto config set show_tab_hint false
 Set it back to `true`, or run `howto config unset show_tab_hint`, to show the
 reminder again. This setting does not disable the shell integration or prevent
 an eligible generated command from being offered at the next empty prompt.
+
+### Beta failed-command advisor
+
+The failed-command advisor is disabled by default and requires active shell
+integration. When explicitly enabled, it observes a command entered at an
+interactive prompt. If that command fails, HowTo sends only its raw command
+text and numeric exit status to the managed local model and prints a suggested
+replacement. This can delay the next prompt while the local model responds;
+runtime acquisition and inference share a 20-second overall deadline, and a
+busy runtime causes that suggestion to be skipped.
+
+```console
+HowTo beta suggestion (review only; not executed):
+  git status
+```
+
+The advisor does not capture command output, the current directory, environment
+variables, directory listings, or file contents. HowTo does not keep a failed-
+command history. Suggestions are untrusted text: the advisor never executes,
+copies, inserts, or stages one for the Tab shortcut.
+
+Enable or disable it explicitly:
+
+```sh
+howto config set failed_command_advisor true
+howto config set failed_command_advisor false
+```
+
+The adapter checks this preference before sending any failed command text, so
+changes take effect on the next eligible failure in an already-open shell.
+The adapter also binds HowTo's executable and state/runtime selection when the
+shell starts; if you intentionally change `HOWTO_HOME`, XDG paths, model, or
+runtime overrides, open a new terminal to activate that new boundary.
+
+The feature supports zsh and fish, plus Bash 5.1 and newer. Bash 4.1–5.0 can
+still use Tab insertion but not the advisor. `failed_command_advisor=true` and
+`server_url` cannot be configured together, so a configured provider never
+receives advisor input; normal explicit HowTo queries continue to use that
+provider as documented below. The Bash advisor also requires interactive
+command history to be enabled; HowTo reads the current line but does not create
+another history.
+
+Eligibility is deliberately narrow: one literal external command of at most
+4096 bytes with an exit status from 1 through 127. Shell pipelines, redirects,
+expansions, wrappers and builtins, control characters, leading whitespace, and
+secret-like text are skipped before inference. These filters reduce accidental
+disclosure but cannot recognize every sensitive value.
 
 Run `howto` with no request for an interactive prompt, or pipe a UTF-8 request on
 stdin:
@@ -253,6 +312,7 @@ howto config list
 howto config get threads
 howto config set threads 4
 howto config set show_tab_hint false
+howto config set failed_command_advisor true
 howto config unset threads
 howto config path
 ```
@@ -267,6 +327,7 @@ howto config path
 | `max_tokens` | `96` | Maximum generated tokens. Valid range: 16–4096 and strictly smaller than `context_size`. |
 | `startup_timeout_seconds` | `90` | Managed-server startup deadline. Valid range: 1–600. |
 | `show_tab_hint` | `true` | Show the post-query reminder that Tab can insert the pending command. Setting this to `false` hides only the reminder; Tab insertion remains enabled. |
+| `failed_command_advisor` | `false` | Opt in to beta, print-only suggestions after eligible failed interactive commands. Uses only the managed local model and cannot be combined with `server_url`. |
 | `shell_path` | `/bin/zsh` on macOS; `/bin/bash` on Linux | Absolute path to zsh, bash, sh, or dash, used only after approved execution. |
 | `model_id` | `howto` | Model name sent to the completion endpoint and local runtime alias. |
 
@@ -284,7 +345,7 @@ the system temporary directory, a set `TMPDIR` must be absolute as well.
 | `HOWTO_PACKAGED_MODEL` | Add an explicit package-provided default-model candidate. |
 | `HOWTO_LLAMA_SERVER` | Override `llama_server_path`. |
 | `HOWTO_API_KEY` | Send a bearer token to a configured endpoint; it is not used as the managed local token. |
-| `HOWTO_SHELL_SESSION` | Internal per-shell identifier exported by the managed Tab adapter; do not set it manually. |
+| `HOWTO_SHELL_SESSION` | Internal per-shell identifier exported by the managed shell adapter; do not set it manually. |
 
 ### Replaceable provider boundary
 
@@ -306,6 +367,11 @@ in transit. The request includes llama.cpp's `repeat_penalty` and
 not guaranteed. Each requested alternative is a separate `n: 1` completion,
 so a remote provider receives the prompt—and the bearer token when set—more
 than once.
+
+Configured providers are never used by the beta failed-command advisor. While
+`server_url` is set, enabling the advisor is rejected. Likewise, set
+`failed_command_advisor` to `false` before configuring `server_url`. This keeps
+failed command text and exit status away from configured endpoints.
 
 Configured providers replace only inference. HowTo's output validation,
 platform rules, risk display, and execution gate remain local. Requests may

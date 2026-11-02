@@ -1,0 +1,460 @@
+#!/usr/bin/env expect -f
+
+# Exercise the failed-command advisor through real interactive shells. The
+# fake `howto` records only advisor invocations, so an unchanged log also
+# proves that successful and locally excluded commands did not spawn it.
+
+set timeout 10
+log_user 0
+
+set project_root [file normalize [file join [file dirname [info script]] ..]]
+set temp_root_base "/tmp"
+if {[info exists env(TMPDIR)] && $env(TMPDIR) ne ""} {
+    set temp_root_base $env(TMPDIR)
+}
+set temp_root [file join $temp_root_base "howto-advisor-test.[pid].[clock clicks]"]
+if {[catch {file mkdir $temp_root} mkdir_error]} {
+    puts stderr "FAIL: could not create temporary directory: $mkdir_error"
+    exit 1
+}
+set fake_bin [file join $temp_root bin]
+set shadow_bin [file join $temp_root shadow-bin]
+set advisor_log [file join $temp_root advisor.log]
+set readiness_log [file join $temp_root readiness.log]
+set shadow_log [file join $temp_root shadow.log]
+set advisor_state [file join $temp_root advisor.state]
+set hook_log [file join $temp_root hook.log]
+set transcript [file join $temp_root shell-output.log]
+file mkdir $fake_bin
+file mkdir $shadow_bin
+log_file -noappend $transcript
+
+proc write_text {path contents} {
+    set channel [open $path w]
+    puts -nonewline $channel $contents
+    close $channel
+}
+
+proc read_text {path} {
+    if {![file exists $path]} {
+        return ""
+    }
+    set channel [open $path r]
+    set contents [read $channel]
+    close $channel
+    return $contents
+}
+
+proc cleanup {} {
+    global spawn_id temp_root
+    if {[info exists spawn_id]} {
+        catch {send -- "\003"}
+        catch {close}
+        catch {wait}
+    }
+    catch {file delete -force -- $temp_root}
+}
+
+proc fail {message} {
+    cleanup
+    puts stderr "FAIL: $message"
+    exit 1
+}
+
+proc buffered_output {} {
+    global expect_out
+    if {[info exists expect_out(buffer)]} {
+        return $expect_out(buffer)
+    }
+    return "<no buffered output>"
+}
+
+proc find_program {name} {
+    set result [auto_execok $name]
+    if {[llength $result] == 0} {
+        return ""
+    }
+    return [lindex $result 0]
+}
+
+proc bash_supports_advisor {executable} {
+    global expect_out spawn_id
+
+    spawn -noecho $executable --noprofile --norc -c {
+        printf 'HOWTO_BASH_VERSION:%s.%s\n' "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"
+    }
+    set supported 0
+    expect {
+        -re {HOWTO_BASH_VERSION:([0-9]+)\.([0-9]+)} {
+            set major $expect_out(1,string)
+            set minor $expect_out(2,string)
+            set supported [expr {$major > 5 || ($major == 5 && $minor >= 1)}]
+            exp_continue
+        }
+        eof {}
+        timeout {
+            fail "could not determine Bash version; output: [buffered_output]"
+        }
+    }
+    catch {wait}
+    unset -nocomplain spawn_id
+    return $supported
+}
+
+proc expect_prompt {shell_name} {
+    expect {
+        -exact "HOWTO-TEST> " { return }
+        timeout {
+            fail "$shell_name did not return to its prompt; output: [buffered_output]"
+        }
+        eof {
+            fail "$shell_name exited before displaying its prompt; output: [buffered_output]"
+        }
+    }
+}
+
+proc advisor_calls {} {
+    global advisor_log
+    set contents [string trimright [read_text $advisor_log] "\n"]
+    if {$contents eq ""} {
+        return {}
+    }
+    return [split $contents "\n"]
+}
+
+proc assert_call_count {shell_name expected context} {
+    set actual [llength [advisor_calls]]
+    if {$actual != $expected} {
+        fail "$shell_name made $actual advisor calls after $context; expected $expected"
+    }
+}
+
+proc assert_shadow_unused {shell_name context} {
+    global shadow_log
+    set calls [string trim [read_text $shadow_log]]
+    if {$calls ne ""} {
+        fail "$shell_name used a PATH-shadowing howto after $context: $calls"
+    }
+}
+
+proc set_advisor_state {state} {
+    global advisor_state
+    write_text $advisor_state "$state\n"
+}
+
+proc expect_advice {shell_name status command_line} {
+    expect {
+        -exact "HOWTO-ADVISED:$status:$command_line" {}
+        timeout {
+            fail "$shell_name did not display advisor output; output: [buffered_output]"
+        }
+        eof {
+            fail "$shell_name exited while advising; output: [buffered_output]"
+        }
+    }
+    expect_prompt $shell_name
+}
+
+proc send_and_expect_prompt {shell_name command_line} {
+    set token "HOWTO-DONE-[clock clicks]"
+    send -- "$command_line\r"
+    send -- "printf '$token\\n'\r"
+    expect {
+        -exact "$token" {}
+        timeout {
+            fail "$shell_name did not run <$command_line>; output: [buffered_output]"
+        }
+        eof {
+            fail "$shell_name exited while running <$command_line>; output: [buffered_output]"
+        }
+    }
+    expect_prompt $shell_name
+}
+
+proc start_shell {shell_name executable adapter} {
+    global env spawn_id
+
+    set env(HOWTO_TEST_ADAPTER) $adapter
+    switch -- $shell_name {
+        zsh {
+            spawn -noecho $executable -f
+            send -- {PROMPT='HOWTO-TEST> '; RPROMPT=; PROMPT2='HOWTO-CONT> '; setopt pipefail; autoload -Uz add-zsh-hook; function _howto_test_preexec { print -r -- "preexec:$1" >> "$HOWTO_TEST_HOOK_LOG"; return 0 }; function _howto_test_precmd { print -r -- "precmd:$?" >> "$HOWTO_TEST_HOOK_LOG"; return 0 }; add-zsh-hook preexec _howto_test_preexec; add-zsh-hook precmd _howto_test_precmd}
+            send -- "\r"
+        }
+        bash {
+            spawn -noecho $executable --noprofile --norc
+            send -- {unset PROMPT_COMMAND; PS1='HOWTO-TEST> '; PS2='HOWTO-CONT> '; HISTFILE=/dev/null; HISTCONTROL=ignorespace; set -o history; set -o pipefail; function _howto_test_prompt_hook { printf 'prompt:%s\n' "$?" >> "$HOWTO_TEST_HOOK_LOG"; return 0; }; PROMPT_COMMAND=_howto_test_prompt_hook}
+            send -- "\r"
+        }
+        fish {
+            set previous_term $env(TERM)
+            set env(TERM) dumb
+            spawn -noecho $executable --no-config --interactive
+            set env(TERM) $previous_term
+            expect {
+                -glob {*> *} {}
+                timeout {
+                    fail "$shell_name did not finish interactive startup; output: [buffered_output]"
+                }
+                eof {
+                    fail "$shell_name exited during interactive startup; output: [buffered_output]"
+                }
+            }
+            send -- {set -e fish_private_mode; function fish_prompt; printf 'HOWTO-TEST> '; end; function _howto_test_postexec --on-event fish_postexec; printf 'postexec:%s:%s\n' $status "$argv[1]" >> "$HOWTO_TEST_HOOK_LOG"; return 0; end}
+            send -- "\r"
+        }
+        default {
+            fail "unknown test shell: $shell_name"
+        }
+    }
+
+    expect_prompt $shell_name
+    send -- "source \"\$HOWTO_TEST_ADAPTER\"\r"
+    expect_prompt $shell_name
+}
+
+proc prepend_shadow_path {shell_name} {
+    global env
+    switch -- $shell_name {
+        zsh {
+            send -- {path=("$HOWTO_TEST_SHADOW_BIN" $path); rehash}
+        }
+        bash {
+            send -- {PATH="$HOWTO_TEST_SHADOW_BIN:$PATH"; export PATH; hash -r}
+        }
+        fish {
+            send -- {set -gx PATH "$HOWTO_TEST_SHADOW_BIN" $PATH}
+        }
+    }
+    send -- "\r"
+    expect_prompt $shell_name
+}
+
+proc remove_shadow_path {shell_name} {
+    switch -- $shell_name {
+        zsh {
+            send -- {path=($path[2,-1]); rehash}
+        }
+        bash {
+            send -- {PATH=${PATH#*:}; export PATH; hash -r}
+        }
+        fish {
+            send -- {set -e PATH[1]}
+        }
+    }
+    send -- "\r"
+    expect_prompt $shell_name
+}
+
+proc stop_shell {shell_name} {
+    global spawn_id
+    send -- "exit\r"
+    expect {
+        eof {}
+        timeout {
+            fail "$shell_name did not exit cleanly; output: [buffered_output]"
+        }
+    }
+    catch {wait}
+    unset -nocomplain spawn_id
+}
+
+proc run_adapter_test {shell_name executable adapter} {
+    global advisor_log readiness_log shadow_log hook_log env
+
+    file delete -force -- $advisor_log $readiness_log $shadow_log $hook_log
+    set_advisor_state enabled
+    start_shell $shell_name $executable $adapter
+
+    send_and_expect_prompt $shell_name true
+    assert_call_count $shell_name 0 "a successful command"
+
+    prepend_shadow_path $shell_name
+    set shadow_test {command sh -c 'exit 5'}
+    send -- "$shadow_test\r"
+    expect_advice $shell_name 5 $shadow_test
+    assert_call_count $shell_name 1 "an eligible failure after PATH shadowing"
+    assert_shadow_unused $shell_name "the adapter was sourced"
+    remove_shadow_path $shell_name
+
+    set advised_command {command sh -c 'exit 7'}
+    send -- "$advised_command\r"
+    expect_advice $shell_name 7 $advised_command
+    set calls [advisor_calls]
+    if {[lindex $calls 1] ne "7\t$advised_command"} {
+        fail "$shell_name did not preserve the exact failed command and status"
+    }
+
+    if {$shell_name ne "fish"} {
+        # fish does not emit fish_postexec for leading-whitespace commands.
+        send_and_expect_prompt $shell_name "  command sh -c 'exit 9'"
+        assert_call_count $shell_name 2 "a leading-whitespace command"
+    }
+
+    send -- "\r"
+    expect_prompt $shell_name
+    assert_call_count $shell_name 2 "a blank command"
+
+    if {$shell_name ne "bash"} {
+        # Bash flattens interactive multiline history before PROMPT_COMMAND;
+        # the Rust command remains the authoritative multiline rejection.
+        send -- "false &&\rtrue\r"
+        expect_prompt $shell_name
+        assert_call_count $shell_name 2 "a multiline command"
+    }
+
+    send_and_expect_prompt $shell_name "command sh -c 'exit 130'"
+    assert_call_count $shell_name 2 "a signal-like status"
+
+    send_and_expect_prompt $shell_name "command howto deliberately-fail"
+    assert_call_count $shell_name 2 "an internal howto command"
+
+    set retry_command {command sh -c 'exit 10'}
+    send_and_expect_prompt $shell_name $retry_command
+    assert_call_count $shell_name 3 "a non-sentinel advisor error"
+
+    set retry_success {command sh -c 'exit 6'}
+    send -- "$retry_success\r"
+    expect_advice $shell_name 6 $retry_success
+    assert_call_count $shell_name 4 "a failure after a non-sentinel advisor error"
+
+    set disable_command {command sh -c 'exit 11'}
+    send_and_expect_prompt $shell_name $disable_command
+    assert_call_count $shell_name 5 "an exit-78 advisor result"
+    set calls [advisor_calls]
+    if {[lindex $calls 4] ne "11\t$disable_command"} {
+        fail "$shell_name did not pass the exit-78 command exactly"
+    }
+
+    set after_78 {command sh -c 'exit 12'}
+    send -- "$after_78\r"
+    expect_advice $shell_name 12 $after_78
+    assert_call_count $shell_name 6 "an eligible failure after exit 78"
+
+    send_and_expect_prompt $shell_name {printf 'disabled\n' > "$HOWTO_TEST_ADVISOR_STATE"}
+    send_and_expect_prompt $shell_name "command sh -c 'exit 13'"
+    assert_call_count $shell_name 6 "a failure after live opt-out"
+
+    send_and_expect_prompt $shell_name {printf 'enabled\n' > "$HOWTO_TEST_ADVISOR_STATE"}
+    set after_opt_in {command sh -c 'exit 14'}
+    send -- "$after_opt_in\r"
+    expect_advice $shell_name 14 $after_opt_in
+    assert_call_count $shell_name 7 "a failure after live opt-in"
+
+    if {$shell_name eq "fish"} {
+        send_and_expect_prompt $shell_name {set -g fish_private_mode 1}
+        send_and_expect_prompt $shell_name "command sh -c 'exit 15'"
+        assert_call_count $shell_name 7 "a failure in fish private mode"
+        send_and_expect_prompt $shell_name {set -e fish_private_mode}
+    }
+
+    set hooks [read_text $hook_log]
+    switch -- $shell_name {
+        zsh {
+            if {[string first "preexec:$advised_command\n" $hooks] < 0
+                || [string first "precmd:7\n" $hooks] < 0} {
+                fail "zsh did not preserve pre-existing preexec/precmd hooks and status"
+            }
+        }
+        bash {
+            if {[string first "prompt:7\n" $hooks] < 0} {
+                fail "bash did not preserve the pre-existing PROMPT_COMMAND status"
+            }
+        }
+        fish {
+            if {[string first "postexec:7:$advised_command\n" $hooks] < 0} {
+                fail "fish did not preserve the pre-existing fish_postexec hook and status"
+            }
+        }
+    }
+
+    stop_shell $shell_name
+    puts "PASS: $shell_name failed-command advisor"
+}
+
+set fake_howto [file join $fake_bin howto]
+write_text $fake_howto {#!/bin/sh
+readiness_log="$HOWTO_HOME/readiness.log"
+advisor_state="$HOWTO_HOME/advisor.state"
+advisor_log="$HOWTO_HOME/advisor.log"
+if [ "$#" -eq 2 ] && [ "$1" = shell ] && [ "$2" = advisor-ready ]; then
+    printf 'ready\n' >> "$readiness_log"
+    if [ "$(sed -n '1p' "$advisor_state")" = enabled ]; then
+        exit 0
+    fi
+    exit 78
+fi
+if [ "$#" -eq 4 ] && [ "$1" = shell ] && [ "$2" = advise ] && [ "$3" = --status ]; then
+    command_line=$(cat) || exit 70
+    printf '%s\t%s\n' "$4" "$command_line" >> "$advisor_log"
+    if [ "$4" -eq 10 ]; then
+        exit 1
+    fi
+    if [ "$4" -eq 11 ]; then
+        exit 78
+    fi
+    printf 'HOWTO-ADVISED:%s:%s\n' "$4" "$command_line"
+    exit 0
+fi
+if [ "$#" -eq 2 ] && [ "$1" = shell ] && [ "$2" = take ]; then
+    exit 1
+fi
+exit 64
+}
+file attributes $fake_howto -permissions 0755
+
+set shadow_howto [file join $shadow_bin howto]
+write_text $shadow_howto {#!/bin/sh
+printf '%s\n' "$*" >> "$HOWTO_HOME/shadow.log"
+exit 99
+}
+file attributes $shadow_howto -permissions 0755
+
+set env(HOME) [file join $temp_root home]
+set env(ZDOTDIR) $env(HOME)
+set env(HISTFILE) /dev/null
+set env(HOWTO_HOME) $temp_root
+set env(PATH) "$fake_bin:$env(PATH)"
+set env(TERM) xterm-256color
+set env(HOWTO_TEST_ADVISOR_LOG) $advisor_log
+set env(HOWTO_TEST_READINESS_LOG) $readiness_log
+set env(HOWTO_TEST_ADVISOR_STATE) $advisor_state
+set env(HOWTO_TEST_SHADOW_BIN) $shadow_bin
+set env(HOWTO_TEST_SHADOW_LOG) $shadow_log
+set env(HOWTO_TEST_HOOK_LOG) $hook_log
+file mkdir $env(HOME)
+
+set tested 0
+foreach shell_name {zsh bash fish} {
+    set executable [find_program $shell_name]
+    if {$executable eq ""} {
+        puts "SKIP: $shell_name is not installed"
+        continue
+    }
+    if {$shell_name eq "bash" && ![bash_supports_advisor $executable]} {
+        puts "SKIP: bash is older than 5.1"
+        continue
+    }
+
+    set adapter [file join $project_root shell "howto.$shell_name"]
+    if {![file isfile $adapter]} {
+        fail "missing adapter: $adapter"
+    }
+    run_adapter_test $shell_name $executable $adapter
+    incr tested
+}
+
+if {$tested == 0} {
+    puts "SKIP: no supported test shell is installed"
+}
+
+log_file
+set output [read_text $transcript]
+foreach unexpected {{invalid subcommand} {The expanded command was empty} {unknown option}} {
+    if {[string first $unexpected $output] >= 0} {
+        fail "shell adapter emitted an internal error containing <$unexpected>"
+    }
+}
+
+cleanup
+exit 0

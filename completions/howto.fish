@@ -58,12 +58,12 @@ function __howto_config_key_context
     test "$words[2]" = config; and contains -- $words[3] get set unset
 end
 
-function __howto_show_tab_hint_value_context
+function __howto_boolean_config_value_context
     set -l words (commandline -opc)
     test (count $words) -eq 4; or return 1
     test "$words[2]" = config
     and test "$words[3]" = set
-    and test "$words[4]" = show_tab_hint
+    and contains -- $words[4] show_tab_hint failed_command_advisor
 end
 
 function __howto_query_option_context
@@ -111,7 +111,7 @@ for command in howto
     complete -c $command -n '__howto_query_option_context' -l json -d 'Emit JSON'
     complete -c $command -n '__howto_query_option_context' -l timing -d 'Show generation timing'
     complete -c $command -n '__howto_management_is doctor' -a '--json --deep'
-    complete -c $command -n '__howto_management_is setup' -s y -l yes -d 'Accept setup prompts'
+    complete -c $command -n '__howto_management_is setup' -s y -l yes -d 'Accept default-Yes setup prompts'
     complete -c $command -n '__howto_management_is setup' -l no-shell -d 'Disable Tab integration'
     complete -c $command -n '__howto_management_is setup' -l shell -x -a 'zsh bash fish' -d 'Configure a shell'
     complete -c $command -n '__howto_management_root_is model' -a 'status install --json --deep'
@@ -126,6 +126,6 @@ for command in howto
     complete -c $command -n '__howto_management_action_is shell status' -a '--json'
     complete -c $command -n '__howto_management_root_is config' -a 'list path get set unset --json'
     complete -c $command -n '__howto_management_action_is config list' -a '--json'
-    complete -c $command -n '__howto_config_key_context' -a 'model_path llama_server_path server_url threads context_size max_tokens startup_timeout_seconds show_tab_hint shell_path model_id'
-    complete -c $command -n '__howto_show_tab_hint_value_context' -a 'true false'
+    complete -c $command -n '__howto_config_key_context' -a 'model_path llama_server_path server_url threads context_size max_tokens startup_timeout_seconds show_tab_hint failed_command_advisor shell_path model_id'
+    complete -c $command -n '__howto_boolean_config_value_context' -a 'true false'
 end

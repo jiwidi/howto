@@ -279,12 +279,14 @@ write_text $fake_howto {#!/bin/sh
 if [ "$#" -ne 2 ] || [ "$1" != "shell" ] || [ "$2" != "take" ]; then
     exit 64
 fi
-printf '%s\n' "$*" >> "$HOWTO_TEST_TAKE_LOG"
-if [ ! -s "$HOWTO_TEST_PENDING" ]; then
+take_log="$HOWTO_HOME/take.log"
+pending_file="$HOWTO_HOME/pending"
+printf '%s\n' "$*" >> "$take_log"
+if [ ! -s "$pending_file" ]; then
     exit 1
 fi
-IFS= read -r pending < "$HOWTO_TEST_PENDING" || exit 1
-rm -f -- "$HOWTO_TEST_PENDING"
+IFS= read -r pending < "$pending_file" || exit 1
+rm -f -- "$pending_file"
 printf '%s\n' "$pending"
 }
 file attributes $fake_howto -permissions 0755
@@ -292,10 +294,9 @@ write_text $native_file "HOWTO_NATIVE_COMPLETION_OK\n"
 
 set env(HOME) [file join $temp_root home]
 set env(ZDOTDIR) $env(HOME)
+set env(HOWTO_HOME) $temp_root
 set env(PATH) "$fake_bin:$env(PATH)"
 set env(TERM) xterm-256color
-set env(HOWTO_TEST_PENDING) $pending_file
-set env(HOWTO_TEST_TAKE_LOG) $take_log
 file mkdir $env(HOME)
 
 set tested 0

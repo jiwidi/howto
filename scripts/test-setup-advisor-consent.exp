@@ -1,0 +1,300 @@
+#!/usr/bin/env expect -f
+
+# Exercise the beta failed-command advisor consent through a real
+# pseudo-terminal. A sparse dummy GGUF and a version-only fake llama-server
+# keep setup completely offline and prevent a managed server from starting.
+
+set timeout 10
+log_user 0
+
+set project_root [file normalize [file join [file dirname [info script]] ..]]
+if {[info exists env(HOWTO_TEST_BINARY)] && $env(HOWTO_TEST_BINARY) ne ""} {
+    set howto [file normalize $env(HOWTO_TEST_BINARY)]
+} else {
+    set howto [file join $project_root target debug howto]
+}
+if {![file executable $howto] || ![file isfile $howto]} {
+    puts stderr "FAIL: HowTo test binary is missing or not executable: $howto"
+    puts stderr "Build it first with: cargo build --locked --bin howto"
+    exit 1
+}
+
+set temp_parent /tmp
+if {[info exists env(TMPDIR)] && $env(TMPDIR) ne ""} {
+    set temp_parent $env(TMPDIR)
+}
+set temp_root [file join $temp_parent "howto-advisor-consent.[pid].[clock clicks]"]
+if {[catch {file mkdir $temp_root} mkdir_error]} {
+    puts stderr "FAIL: could not create temporary directory: $mkdir_error"
+    exit 1
+}
+set temp_root [file normalize $temp_root]
+
+set advisor_prompt "Enable the beta failed-command advisor? It sends only raw failed-command text and its exit status to the managed local model, then prints a suggestion without running it. \[y/N\] "
+
+proc write_text {path contents} {
+    set channel [open $path w]
+    puts -nonewline $channel $contents
+    close $channel
+}
+
+proc read_text {path} {
+    set channel [open $path r]
+    set contents [read $channel]
+    close $channel
+    return $contents
+}
+
+proc cleanup {} {
+    global spawn_id temp_root
+    if {[info exists spawn_id]} {
+        catch {send -- "\003"}
+        catch {close}
+        catch {wait}
+        unset -nocomplain spawn_id
+    }
+    catch {file delete -force -- $temp_root}
+}
+
+proc fail {message} {
+    cleanup
+    puts stderr "FAIL: $message"
+    exit 1
+}
+
+proc assert_true {condition message} {
+    if {![uplevel 1 [list expr $condition]]} {
+        fail $message
+    }
+}
+
+proc finish_spawn {name} {
+    global spawn_id
+
+    expect {
+        -exact "HowTo setup is complete." {}
+        timeout { fail "$name did not report successful setup" }
+        eof { fail "$name exited before reporting successful setup" }
+    }
+    expect {
+        eof {}
+        timeout { fail "$name did not exit after setup completed" }
+    }
+    set wait_result [wait]
+    unset -nocomplain spawn_id
+    if {[lindex $wait_result 3] != 0} {
+        fail "$name exited with status [lindex $wait_result 3]"
+    }
+}
+
+proc create_fixture {name} {
+    global temp_root
+
+    set root [file join $temp_root $name]
+    set home [file join $root home]
+    set state [file join $root state]
+    file mkdir $home
+    file mkdir $state
+    write_text [file join $state config.json] \
+        "{\"schema\":1,\"failed_command_advisor\":false}\n"
+    return [list $home $state]
+}
+
+proc select_fixture {fixture} {
+    global env
+
+    lassign $fixture home state
+    set env(HOME) $home
+    set env(ZDOTDIR) $home
+    set env(SHELL) /bin/zsh
+    set env(HOWTO_HOME) $state
+    unset -nocomplain env(HOWTO_SHELL_SESSION)
+}
+
+proc assert_config_state {name state expected} {
+    set config_path [file join $state config.json]
+    assert_true {[file isfile $config_path]} "$name did not preserve its configuration"
+    set config [read_text $config_path]
+    set needle "\"failed_command_advisor\": $expected"
+    set compact_needle "\"failed_command_advisor\":$expected"
+    assert_true {
+        [string first $needle $config] >= 0 ||
+        [string first $compact_needle $config] >= 0
+    } "$name did not save failed-command advisor state as $expected"
+}
+
+proc assert_prompted_state {name state expected} {
+    set receipt_path [file join $state setup.json]
+    assert_true {[file isfile $receipt_path]} "$name did not save a setup receipt"
+    set receipt [read_text $receipt_path]
+    set needle "\"failed_command_advisor_prompted\": $expected"
+    assert_true {[string first $needle $receipt] >= 0} \
+        "$name did not record failed-command advisor prompt state as $expected"
+}
+
+proc run_interactive_choice {name answer expected_config expected_message} {
+    global advisor_prompt howto spawn_id
+
+    set fixture [create_fixture $name]
+    select_fixture $fixture
+    lassign $fixture _ state
+
+    # --yes may approve the model and shell setup, but it must never answer the
+    # separate beta prompt on the user's behalf.
+    spawn -noecho $howto setup --yes --shell zsh
+    expect {
+        -exact $advisor_prompt {}
+        timeout { fail "$name did not present the exact default-No advisor prompt" }
+        eof { fail "$name exited before requesting advisor consent" }
+    }
+    send -- $answer
+    expect {
+        -exact $expected_message {}
+        timeout { fail "$name did not report the selected advisor state" }
+        eof { fail "$name exited before reporting the selected advisor state" }
+    }
+    finish_spawn $name
+
+    assert_config_state $name $state $expected_config
+    assert_prompted_state $name $state true
+    return $fixture
+}
+
+proc verify_no_reprompt {name fixture} {
+    global advisor_prompt howto spawn_id
+
+    select_fixture $fixture
+    spawn -noecho $howto setup --yes --shell zsh
+    expect {
+        -exact $advisor_prompt {
+            fail "$name asked for advisor consent again after the user declined"
+        }
+        -exact "HowTo setup is complete." {}
+        timeout { fail "$name did not complete the repeated setup" }
+        eof { fail "$name exited before completing the repeated setup" }
+    }
+    expect {
+        eof {}
+        timeout { fail "$name did not exit after repeated setup" }
+    }
+    set wait_result [wait]
+    unset -nocomplain spawn_id
+    if {[lindex $wait_result 3] != 0} {
+        fail "$name repeated setup exited with status [lindex $wait_result 3]"
+    }
+}
+
+proc verify_noninteractive_yes_does_not_consent {} {
+    global advisor_prompt expect_out howto spawn_id
+
+    set fixture [create_fixture noninteractive-yes]
+    select_fixture $fixture
+    lassign $fixture _ state
+
+    spawn -noecho /bin/sh -c \
+        {exec "$1" setup --yes --shell zsh </dev/null 2>&1} sh $howto
+    expect {
+        -exact $advisor_prompt {
+            fail "non-interactive setup displayed an unusable consent prompt"
+        }
+        eof {
+            set output $expect_out(buffer)
+        }
+        timeout { fail "non-interactive --yes setup did not exit" }
+    }
+    set wait_result [wait]
+    unset -nocomplain spawn_id
+    if {[lindex $wait_result 3] != 0} {
+        fail "non-interactive --yes setup exited with status [lindex $wait_result 3]: $output"
+    }
+    assert_true {[string first $advisor_prompt $output] < 0} \
+        "non-interactive setup unexpectedly displayed an unusable consent prompt"
+    assert_config_state noninteractive-yes $state false
+    assert_prompted_state noninteractive-yes $state false
+}
+
+proc verify_interrupted_consent_is_recoverable {} {
+    global advisor_prompt howto spawn_id
+
+    set fixture [create_fixture interrupted]
+    select_fixture $fixture
+    lassign $fixture home state
+
+    spawn -noecho $howto setup --yes --shell zsh
+    expect {
+        -exact $advisor_prompt {}
+        timeout { fail "interrupted setup did not reach the advisor prompt" }
+        eof { fail "interrupted setup exited before the advisor prompt" }
+    }
+    send -- "\003"
+    expect {
+        eof {}
+        timeout { fail "Ctrl-C did not terminate the advisor prompt" }
+    }
+    catch {wait}
+    unset -nocomplain spawn_id
+
+    assert_config_state interrupted $state false
+    assert_prompted_state interrupted $state false
+    set receipt [read_text [file join $state setup.json]]
+    assert_true {[string first {"shell": "zsh"} $receipt] >= 0} \
+        "interrupted setup did not checkpoint its installed shell integration"
+    set startup [file join $home .zshrc]
+    assert_true {[file isfile $startup]} \
+        "interrupted setup left no startup file for its recorded integration"
+    assert_true {[string first {>>> HowTo shell integration >>>} [read_text $startup]] >= 0} \
+        "interrupted setup recorded an integration without its managed block"
+
+    # A retry must offer the unanswered privacy choice again, then finish
+    # without duplicating the already-checkpointed shell integration.
+    select_fixture $fixture
+    spawn -noecho $howto setup --yes --shell zsh
+    expect {
+        -exact $advisor_prompt {}
+        timeout { fail "setup did not re-offer consent after Ctrl-C" }
+        eof { fail "setup exited before re-offering consent after Ctrl-C" }
+    }
+    send -- "n\r"
+    expect {
+        -exact "The beta failed-command advisor remains disabled." {}
+        timeout { fail "recovered setup did not accept an explicit decline" }
+        eof { fail "recovered setup exited before recording the decline" }
+    }
+    finish_spawn interrupted-retry
+    assert_prompted_state interrupted-retry $state true
+}
+
+# Create one shared offline runtime/model fixture. Setup only checks the
+# executable's version exit status and the configured file's GGUF shape.
+set fake_bin [file join $temp_root bin]
+file mkdir $fake_bin
+set fake_server [file join $fake_bin llama-server]
+write_text $fake_server "#!/bin/sh\nexit 0\n"
+file attributes $fake_server -permissions 0700
+
+set fake_model [file join $temp_root fixture.gguf]
+set model_channel [open $fake_model w]
+fconfigure $model_channel -translation binary
+puts -nonewline $model_channel "GGUF"
+seek $model_channel 1048576 start
+puts -nonewline $model_channel "\0"
+close $model_channel
+
+set env(HOWTO_LLAMA_SERVER) $fake_server
+set env(HOWTO_MODEL) $fake_model
+
+set default_no_fixture [run_interactive_choice \
+    default-no "\r" false "The beta failed-command advisor remains disabled."]
+verify_no_reprompt default-no $default_no_fixture
+
+set explicit_no_fixture [run_interactive_choice \
+    explicit-no "n\r" false "The beta failed-command advisor remains disabled."]
+verify_no_reprompt explicit-no $explicit_no_fixture
+run_interactive_choice \
+    approved "y\r" true "Enabled the beta failed-command advisor for zsh."
+verify_noninteractive_yes_does_not_consent
+verify_interrupted_consent_is_recoverable
+
+puts "PASS: interactive setup failed-command advisor consent"
+cleanup
+exit 0

@@ -7,7 +7,7 @@ _howto() {
     'doctor:check the model and runtime'
     'model:install or inspect the model'
     'server:inspect or stop the local server'
-    'shell:manage the context-aware Tab integration'
+    'shell:manage shell integration'
     'config:read or change configuration'
     'help:show help'
     'version:show version'
@@ -42,6 +42,7 @@ _howto() {
     'max_tokens:maximum generated tokens'
     'startup_timeout_seconds:managed-server startup deadline'
     'show_tab_hint:show the post-query Tab reminder'
+    'failed_command_advisor:enable beta local failure suggestions'
     'shell_path:execution shell path'
     'model_id:completion model name'
   )
@@ -50,7 +51,7 @@ _howto() {
     case $words[2] in
       setup)
         _arguments \
-          '(-y --yes)'{-y,--yes}'[accept setup prompts]' \
+          '(-y --yes)'{-y,--yes}'[accept default-Yes setup prompts]' \
           '--no-shell[disable and omit Tab integration]' \
           '--shell[configure a specific shell]:shell:(zsh bash fish)' \
           '--help[show help]'
@@ -119,7 +120,9 @@ _howto() {
           _values 'option' '--json[emit JSON]'
         elif (( CURRENT == 4 )) && [[ $words[3] == get || $words[3] == set || $words[3] == unset ]]; then
           _describe 'configuration key' config_keys
-        elif (( CURRENT == 5 )) && [[ $words[3] == set && $words[4] == show_tab_hint ]]; then
+        elif (( CURRENT == 5 )) \
+          && [[ $words[3] == set \
+            && ( $words[4] == show_tab_hint || $words[4] == failed_command_advisor ) ]]; then
           _values 'boolean' true false
         fi
         return

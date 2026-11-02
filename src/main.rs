@@ -3,7 +3,8 @@ fn main() {
         Ok(0) => {}
         Ok(code) => std::process::exit(code),
         Err(error) => {
-            eprintln!("error: {error}");
+            let message = howto::error::terminal_safe_message(&error.to_string());
+            eprintln!("error: {message}");
             std::process::exit(error.exit_code());
         }
     }

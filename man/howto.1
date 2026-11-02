@@ -1,4 +1,4 @@
-.TH HOWTO 1 "August 12, 2026" "HowTo" "User Commands"
+.TH HOWTO 1 "August 13, 2026" "HowTo" "User Commands"
 .SH NAME
 howto \- turn plain English into a shell command locally
 .SH SYNOPSIS
@@ -36,6 +36,25 @@ The boolean
 configuration setting defaults to true. Setting it to false suppresses only
 the post-query reminder to press Tab; it does not disable Tab insertion or
 prevent an eligible command from being offered at the next empty prompt.
+.PP
+The beta failed-command advisor is disabled by default. After a separate,
+default-No opt-in, a compatible interactive shell sends only the raw text and
+numeric exit status of a failed command to HowTo's managed local model. HowTo
+prints the suggested replacement as untrusted text and never executes, copies,
+inserts, or stages it for Tab. The advisor captures no command output, current
+directory, environment, directory listing, or file content and keeps no failed-
+command history. Runtime acquisition and inference share a 20-second deadline.
+It supports zsh and fish, plus Bash 5.1 and newer. When
+.B server_url
+is configured, the advisor is unavailable and sends nothing to that provider.
+The Bash advisor also requires interactive command history to be enabled; it
+does not create a separate history.
+.PP
+Advisor eligibility is limited to one literal external command no longer than
+4096 bytes with an exit status from 1 through 127. Compound syntax, redirects,
+expansions, wrappers, builtins, control characters, leading whitespace, and
+secret-like text are skipped before inference. This filtering cannot identify
+every sensitive value.
 .PP
 The words help and version select management commands when alone. Doctor
 and setup select management parsing when alone or followed by an option. Model,
@@ -91,11 +110,16 @@ llama-server before downloading, resuming, and verifying the pinned model.
 Configured-provider mode skips the local model. By default, interactive setup
 asks whether to install the Tab integration. Use
 .B --yes
-to accept setup prompts,
+to accept default-Yes setup prompts,
 .B --no-shell
 to complete setup without integration and remove prior managed hooks, or
 .B --shell
 to choose an integration explicitly. Open a new terminal after enabling it.
+Once compatible shell integration is successfully configured, interactive local
+setup separately asks whether to enable the beta failed-command advisor with a
+default answer of No. Neither
+.B --yes
+nor non-interactive setup implies that consent.
 .TP
 .B doctor [--json] [--deep]
 Inspect setup, configuration, model, llama-server, and resident-server status.
@@ -118,7 +142,7 @@ Show resident llama-server status.
 Stop only the llama-server process recorded and validated as HowTo's.
 .TP
 .B shell status [--json]
-Show whether the Tab integration is persistently configured and active in the
+Show whether shell integration is persistently configured and active in the
 current shell.
 .TP
 .B shell enable [--shell zsh|bash|fish]
@@ -142,6 +166,10 @@ surface; normal users should use
 Inspect or update HowTo's JSON configuration. For example,
 .B howto config set show_tab_hint false
 hides only the post-query Tab reminder while leaving Tab insertion enabled.
+Use
+.B howto config set failed_command_advisor true
+for an explicit advisor opt-in, and set it to false to disable automatic
+suggestions without removing Tab insertion.
 .TP
 .B help
 Show help and exit.
@@ -154,8 +182,15 @@ keys. Stored model, llama-server, and shell paths must be absolute. The
 generation limit must be smaller than the configured context size. HTTP(S)
 provider URLs may include a base path but cannot include credentials, a query,
 or a fragment; Unix-socket provider paths must be absolute.
+.PP
 .B show_tab_hint
 accepts true or false and defaults to true.
+.B failed_command_advisor
+also accepts true or false, defaults to false, and is effective only with
+compatible shell integration and the managed local provider. It cannot be true
+while
+.B server_url
+is configured.
 .SH ENVIRONMENT
 .TP
 .B HOWTO_HOME
@@ -176,8 +211,8 @@ Bearer token for a configured external provider. It is removed from the
 environment of a generated command approved for execution.
 .TP
 .B HOWTO_SHELL_SESSION
-Internal non-secret per-shell identifier exported by the managed adapter. Do
-not set it manually.
+Internal non-secret per-shell identifier exported by the managed shell adapter.
+Do not set it manually.
 .TP
 .BR XDG_CONFIG_HOME ", " XDG_DATA_HOME ", " XDG_CACHE_HOME ", " XDG_STATE_HOME
 Linux directory overrides. A value must be absolute when set.
@@ -206,6 +241,7 @@ howto find files larger than 1GB
 howto -x show my current IP address
 howto doctor --deep
 howto shell status
+howto config set failed_command_advisor true
 .fi
 .SH EXIT STATUS
 .TP
