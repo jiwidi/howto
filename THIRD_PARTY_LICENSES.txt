@@ -141,10 +141,10 @@ cfg_aliases 0.2.2
   Included files:
     - LICENSE (SHA-256 31b94860253d8ec7b4529f51901044d3b459d6292d996504a36b1bae3a36a812)
 
-chacha20 0.10.1
+chacha20 0.10.2
   Declared license: MIT OR Apache-2.0
   Source: registry+https://github.com/rust-lang/crates.io-index
-  Cargo checksum: d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81
+  Cargo checksum: 65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06
   Repository: https://github.com/RustCrypto/stream-ciphers
   Included files:
     - LICENSE-APACHE (SHA-256 a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5)
@@ -919,10 +919,10 @@ quinn 0.11.11
     - LICENSE-APACHE (SHA-256 c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4)
     - LICENSE-MIT (SHA-256 4b2d0aca6789fa39e03d6738e869ea0988cceba210ca34ebb59c15c463e93a04)
 
-quinn-proto 0.11.16
+quinn-proto 0.11.19
   Declared license: MIT OR Apache-2.0
   Source: registry+https://github.com/rust-lang/crates.io-index
-  Cargo checksum: 2f4bfc015262b9df63c8845072ce59068853ff5872180c2ce2f13038b970e560
+  Cargo checksum: 0e750cca55fe4f0439a15d0bb529da9651e79993e8e72c61a899a36d462befbe
   Repository: https://github.com/quinn-rs/quinn
   Included files:
     - LICENSE-APACHE (SHA-256 c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4)
@@ -1067,10 +1067,10 @@ rustix 1.1.4
     - LICENSE-Apache-2.0_WITH_LLVM-exception (SHA-256 a6c48161a09acc75a0e25503bab66a731eb5fba5392ed4bb4743e4ba5085327a)
     - LICENSE-MIT (SHA-256 23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3)
 
-rustls 0.23.43
+rustls 0.23.46
   Declared license: Apache-2.0 OR ISC OR MIT
   Source: registry+https://github.com/rust-lang/crates.io-index
-  Cargo checksum: 0283386ce02abc0151e1761d08802dfe86c173b0b494af5cbc086574e453da06
+  Cargo checksum: 48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf
   Repository: https://github.com/rustls/rustls
   Included files:
     - LICENSE-APACHE (SHA-256 a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2)
@@ -1114,10 +1114,10 @@ rustls-platform-verifier-android 0.1.1
   Included files:
     - rustls-platform-verifier-LICENSE-MIT.txt (SHA-256 1c7cf76689c837a68ed8d704994e52a0f2940c087958f860d17f3186afbdcc0c)
 
-rustls-webpki 0.103.13
+rustls-webpki 0.103.16
   Declared license: ISC
   Source: registry+https://github.com/rust-lang/crates.io-index
-  Cargo checksum: 61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e
+  Cargo checksum: 4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281
   Repository: https://github.com/rustls/webpki
   Included files:
     - LICENSE (SHA-256 5b698ca13897be3afdb7174256fa1574f8c6892b8bea1a66dd6469d3fe27885a)
@@ -1397,10 +1397,10 @@ tinyvec_macros 0.1.1
     - LICENSE-MIT.md (SHA-256 1dd8eca0f83669e75fa119e34fb9e1be9d16e3e9b6368962b8019db6e8ae5f7b)
     - LICENSE-ZLIB.md (SHA-256 6abdec69ada0c5f06d4819d9a0db0824ce54d610665df0b64c774480db9c1f2a)
 
-tokio 1.53.1
+tokio 1.54.1
   Declared license: MIT
   Source: registry+https://github.com/rust-lang/crates.io-index
-  Cargo checksum: 202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed
+  Cargo checksum: b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3
   Repository: https://github.com/tokio-rs/tokio
   Included files:
     - LICENSE (SHA-256 253cd04c6714889df2d32f3f64d669179a1c95c76ac43c40882c52eb06bc3552)
@@ -1656,10 +1656,10 @@ web-time 1.1.0
     - LICENSE-APACHE (SHA-256 54a744942eb3fa63a74d8d359989ed6962c04f3f10ff20cfa08ff8aa7efbe4e6)
     - LICENSE-MIT (SHA-256 f428305bbf2e70fbd807af0f3c7ac1b7acfb95311640f451e9d2e48db6d7e96b)
 
-webpki-root-certs 1.0.9
+webpki-root-certs 1.0.11
   Declared license: CDLA-Permissive-2.0
   Source: registry+https://github.com/rust-lang/crates.io-index
-  Cargo checksum: b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b
+  Cargo checksum: e49d0e65abc00c142e8f9428da991da9f1a250c39be97459901eb12b9b49f62a
   Repository: https://github.com/rustls/webpki-roots
   Included files:
     - LICENSE (SHA-256 e271993808fec50ab29350b39539cdec611a9103f827e0aa26d61da70e2d33f8)
@@ -3184,7 +3184,7 @@ SOFTWARE.
 
 SHA-256 253cd04c6714889df2d32f3f64d669179a1c95c76ac43c40882c52eb06bc3552
 Used by:
-  - tokio 1.53.1 (LICENSE)
+  - tokio 1.54.1 (LICENSE)
 
 MIT License
 
@@ -4943,7 +4943,7 @@ SOFTWARE.
 SHA-256 4b2d0aca6789fa39e03d6738e869ea0988cceba210ca34ebb59c15c463e93a04
 Used by:
   - quinn 0.11.11 (LICENSE-MIT)
-  - quinn-proto 0.11.16 (LICENSE-MIT)
+  - quinn-proto 0.11.19 (LICENSE-MIT)
   - quinn-udp 0.5.15 (LICENSE-MIT)
 
 Copyright (c) 2018 The quinn Developers
@@ -5305,7 +5305,7 @@ limitations under the License.
 
 SHA-256 5b698ca13897be3afdb7174256fa1574f8c6892b8bea1a66dd6469d3fe27885a
 Used by:
-  - rustls-webpki 0.103.13 (LICENSE)
+  - rustls-webpki 0.103.16 (LICENSE)
 
 Except as otherwise noted, this project is licensed under the following
 (ISC-style) terms:
@@ -6105,7 +6105,7 @@ APPENDIX: How to apply the Apache License to your work.
 SHA-256 709e3175b4212f7b13aa93971c9f62ff8c69ec45ad8c6532a7e0c41d7a7d6f8c
 Used by:
   - hyper-rustls 0.27.9 (LICENSE-MIT)
-  - rustls 0.23.43 (LICENSE-MIT)
+  - rustls 0.23.46 (LICENSE-MIT)
   - rustls-native-certs 0.8.4 (LICENSE-MIT)
 
 Copyright (c) 2016 Joseph Birr-Pixton <jpixton@gmail.com>
@@ -6862,7 +6862,7 @@ DEALINGS IN THE SOFTWARE.
 SHA-256 7cfafc877eccc46c0e346ccbaa5c51bb6b894d2b818e617d970211e232785ad4
 Used by:
   - hyper-rustls 0.27.9 (LICENSE-ISC)
-  - rustls 0.23.43 (LICENSE-ISC)
+  - rustls 0.23.46 (LICENSE-ISC)
   - rustls-native-certs 0.8.4 (LICENSE-ISC)
 
 ISC License (ISC)
@@ -8243,7 +8243,7 @@ Used by:
   - regex-syntax 0.8.11 (LICENSE-APACHE)
   - rustc_version 0.4.1 (LICENSE-APACHE)
   - rustix 1.1.4 (LICENSE-APACHE)
-  - rustls 0.23.43 (LICENSE-APACHE)
+  - rustls 0.23.46 (LICENSE-APACHE)
   - rustls-native-certs 0.8.4 (LICENSE-APACHE)
   - security-framework 3.7.0 (LICENSE-APACHE)
   - security-framework-sys 2.17.0 (LICENSE-APACHE)
@@ -8725,7 +8725,7 @@ SOFTWARE.
 SHA-256 a9040321c3712d8fd0b09cf52b17445de04a23a10165049ae187cd39e5c86be5
 Used by:
   - block-buffer 0.10.4 (LICENSE-APACHE)
-  - chacha20 0.10.1 (LICENSE-APACHE)
+  - chacha20 0.10.2 (LICENSE-APACHE)
   - cpufeatures 0.2.17 (LICENSE-APACHE)
   - cpufeatures 0.3.0 (LICENSE-APACHE)
   - crypto-common 0.1.7 (LICENSE-APACHE)
@@ -9771,7 +9771,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 SHA-256 b8c6939380a400f53e11923d50fcc4dd2fa1ba8339fd9d04cda38a0251b6c9b0
 Used by:
-  - chacha20 0.10.1 (LICENSE-MIT)
+  - chacha20 0.10.2 (LICENSE-MIT)
 
 Copyright (c) 2019-2026 The RustCrypto Project Developers
 
@@ -10176,7 +10176,7 @@ SOFTWARE.
 SHA-256 c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4
 Used by:
   - quinn 0.11.11 (LICENSE-APACHE)
-  - quinn-proto 0.11.16 (LICENSE-APACHE)
+  - quinn-proto 0.11.19 (LICENSE-APACHE)
   - quinn-udp 0.5.15 (LICENSE-APACHE)
   - rustls-platform-verifier 0.7.0 (LICENSE-APACHE)
 
@@ -11401,7 +11401,7 @@ DEALINGS IN THE SOFTWARE.
 
 SHA-256 e271993808fec50ab29350b39539cdec611a9103f827e0aa26d61da70e2d33f8
 Used by:
-  - webpki-root-certs 1.0.9 (LICENSE)
+  - webpki-root-certs 1.0.11 (LICENSE)
 
 # Community Data License Agreement - Permissive - Version 2.0
 

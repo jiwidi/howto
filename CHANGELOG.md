@@ -29,6 +29,10 @@ and uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until
 
 ### Security
 
+- Update rustls 0.23.46, rustls-webpki 0.103.16, webpki-root-certs 1.0.11,
+  quinn-proto 0.11.19 and tokio 1.54.1. This fixes eleven RustSec advisories
+  in the HTTPS client stack and one tokio soundness advisory. Replace the
+  yanked chacha20 0.10.1 with 0.10.2.
 - Keep all three new tuned profiles unpublished and fail before download until
   tuned-derivative redistribution is cleared and immutable merged GGUFs pass
   prompt/stop-token, regression, digest, Mac/Linux performance, and resident-
